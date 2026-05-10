@@ -63,6 +63,7 @@ def generate_from_input_ids(
 
     generation_config = config or HFGenerationConfig()
     input_tensor = torch.tensor([input_ids], dtype=torch.long, device=model.device)
+    attention_mask = torch.ones_like(input_tensor)
 
     do_sample = generation_config.do_sample
     if do_sample is None:
@@ -85,7 +86,11 @@ def generate_from_input_ids(
             generate_kwargs["top_p"] = generation_config.top_p
 
     with torch.inference_mode():
-        output_ids = model.generate(input_tensor, **generate_kwargs)[0].tolist()
+        output_ids = model.generate(
+            input_tensor,
+            attention_mask=attention_mask,
+            **generate_kwargs,
+        )[0].tolist()
 
     generated_ids = output_ids[len(input_ids) :]
     return HFGenerationResult(
