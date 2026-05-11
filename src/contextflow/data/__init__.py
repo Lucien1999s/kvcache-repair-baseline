@@ -3,7 +3,15 @@ from contextflow.data.assembly import (
     assemble_token_aligned_full_prefill_input,
     assemble_token_aligned_full_prefill_input_ids,
 )
-from contextflow.data.loaders import load_json_examples, parse_input_examples
+from contextflow.data.loaders import (
+    SUPPORTED_QA_DATASET_KEYS,
+    load_json_examples,
+    load_json_or_jsonl,
+    load_qa_dataset_examples,
+    normalize_dataset_key,
+    parse_qa_dataset_examples,
+    parse_input_examples,
+)
 from contextflow.data.prompting import (
     build_cacheblend_prompt,
     build_cacheblend_prompts,
@@ -32,8 +40,13 @@ __all__ = [
     "encode_cacheblend_text",
     "format_cacheblend_context",
     "load_json_examples",
+    "load_json_or_jsonl",
+    "load_qa_dataset_examples",
     "normalize_cacheblend_question",
+    "normalize_dataset_key",
+    "parse_qa_dataset_examples",
     "parse_input_examples",
+    "SUPPORTED_QA_DATASET_KEYS",
     "tokenize_prompt_example",
     "tokenize_prompt_examples",
 ]
