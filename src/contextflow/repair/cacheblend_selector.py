@@ -101,6 +101,41 @@ def select_topk_hkvd_tokens(
     return sorted(int(index) for index in selected)
 
 
+def validate_candidate_indices(candidate_indices: list[int], seq_len: int) -> None:
+    if not candidate_indices:
+        raise ValueError("candidate_indices must be non-empty.")
+    if len(set(candidate_indices)) != len(candidate_indices):
+        raise ValueError("candidate_indices must not contain duplicates.")
+    invalid = [index for index in candidate_indices if index < 0 or index >= seq_len]
+    if invalid:
+        raise ValueError(
+            f"candidate_indices must be in [0, {seq_len}); invalid indices: {invalid}."
+        )
+
+
+def select_topk_hkvd_tokens_from_candidates(
+    layer_deviation: Any,
+    candidate_indices: list[int],
+    ratio: float | None = None,
+    top_k: int | None = None,
+) -> list[int]:
+    """Select highest-deviation token positions from a candidate set."""
+
+    if layer_deviation.ndim != 1:
+        raise ValueError(
+            f"layer_deviation must be 1D with shape [seq_len], got {tuple(layer_deviation.shape)}."
+        )
+
+    seq_len = int(layer_deviation.shape[0])
+    validate_candidate_indices(candidate_indices, seq_len=seq_len)
+    k = resolve_topk_count(len(candidate_indices), ratio=ratio, top_k=top_k)
+
+    candidate_scores = layer_deviation[candidate_indices]
+    selected_offsets = candidate_scores.topk(k=k, largest=True).indices.tolist()
+    selected = [candidate_indices[int(offset)] for offset in selected_offsets]
+    return sorted(int(index) for index in selected)
+
+
 def select_hkvd_tokens_by_layer(
     deviations: list[Any],
     ratio: float | None = None,
@@ -119,3 +154,67 @@ def select_hkvd_tokens_by_layer(
         )
         for layer_index, layer_deviation in enumerate(deviations)
     }
+
+
+def resolve_initial_selection_args(
+    initial_ratio: float | None,
+    initial_top_k: int | None,
+    ratio: float | None,
+    top_k: int | None,
+) -> tuple[float | None, int | None]:
+    resolved_initial_ratio = initial_ratio if initial_ratio is not None else ratio
+    resolved_initial_top_k = initial_top_k if initial_top_k is not None else top_k
+    if (resolved_initial_ratio is None) == (resolved_initial_top_k is None):
+        raise ValueError("Exactly one of initial_ratio or initial_top_k must be provided.")
+    return resolved_initial_ratio, resolved_initial_top_k
+
+
+def resolve_followup_selection_args(
+    ratio: float | None,
+    top_k: int | None,
+) -> tuple[float | None, int | None]:
+    if (ratio is None) == (top_k is None):
+        raise ValueError("Exactly one of ratio or top_k must be provided.")
+    return ratio, top_k
+
+
+def select_gradual_hkvd_tokens_by_layer(
+    deviations: list[Any],
+    initial_top_k: int | None = None,
+    initial_ratio: float | None = None,
+    top_k: int | None = None,
+    ratio: float | None = None,
+) -> dict[int, list[int]]:
+    """Select HKVD tokens with CacheBlend-style gradual layer-wise filtering."""
+
+    if not deviations:
+        raise ValueError("deviations must contain at least one layer.")
+
+    resolved_initial_ratio, resolved_initial_top_k = resolve_initial_selection_args(
+        initial_ratio=initial_ratio,
+        initial_top_k=initial_top_k,
+        ratio=ratio,
+        top_k=top_k,
+    )
+    resolved_ratio, resolved_top_k = resolve_followup_selection_args(ratio=ratio, top_k=top_k)
+
+    selected_by_layer: dict[int, list[int]] = {}
+    selected_by_layer[0] = select_topk_hkvd_tokens(
+        deviations[0],
+        ratio=resolved_initial_ratio,
+        top_k=resolved_initial_top_k,
+    )
+
+    for layer_index in range(1, len(deviations)):
+        selected_by_layer[layer_index] = select_topk_hkvd_tokens_from_candidates(
+            deviations[layer_index],
+            candidate_indices=selected_by_layer[layer_index - 1],
+            ratio=resolved_ratio,
+            top_k=resolved_top_k,
+        )
+        if not set(selected_by_layer[layer_index]).issubset(selected_by_layer[layer_index - 1]):
+            raise RuntimeError(f"Layer {layer_index} selected tokens must be a subset of prior layer.")
+        if len(selected_by_layer[layer_index]) > len(selected_by_layer[layer_index - 1]):
+            raise RuntimeError(f"Layer {layer_index} selected token count must not increase.")
+
+    return selected_by_layer

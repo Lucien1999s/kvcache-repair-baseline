@@ -1,13 +1,17 @@
 from contextflow.repair.cacheblend_selector import (
     compute_kv_deviation,
     compute_layer_kv_deviation,
+    select_gradual_hkvd_tokens_by_layer,
     select_hkvd_tokens_by_layer,
     select_topk_hkvd_tokens,
+    select_topk_hkvd_tokens_from_candidates,
 )
 
 __all__ = [
     "compute_kv_deviation",
     "compute_layer_kv_deviation",
+    "select_gradual_hkvd_tokens_by_layer",
     "select_hkvd_tokens_by_layer",
     "select_topk_hkvd_tokens",
+    "select_topk_hkvd_tokens_from_candidates",
 ]
