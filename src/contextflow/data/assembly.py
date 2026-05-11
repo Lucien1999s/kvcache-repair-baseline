@@ -108,6 +108,32 @@ def assemble_full_prefill_input_from_prompt(
     )
 
 
+def assemble_token_aligned_full_prefill_input_ids(example: TokenizedExample) -> list[int]:
+    """Assemble the logical token layout used by naive KV reuse: docs followed by query."""
+
+    input_ids: list[int] = []
+    for doc_chunk_ids in example.doc_chunk_ids:
+        input_ids.extend(doc_chunk_ids)
+    input_ids.extend(example.q_ids)
+    return input_ids
+
+
+def assemble_token_aligned_full_prefill_input(
+    example: TokenizedExample,
+    tokenizer: AssemblyTokenizer | None = None,
+) -> AssembledInput:
+    """Assemble a TokenizedExample into the token-aligned full-prefill reference input."""
+
+    input_ids = assemble_token_aligned_full_prefill_input_ids(example)
+    input_text = tokenizer.decode(input_ids) if tokenizer is not None else None
+    return AssembledInput(
+        input_ids=input_ids,
+        input_text=input_text,
+        example_id=example.example_id,
+        suffix_len=len(example.q_ids),
+    )
+
+
 def encode_cacheblend_mistral_prefix_prompt(
     tokenizer: AssemblyTokenizer | None,
     prefix_prompt: str,

@@ -6,6 +6,8 @@ from contextflow.data.assembly import (
     assemble_cacheblend_mistral_input_ids,
     assemble_full_prefill_input_from_prompt,
     assemble_full_prefill_input_ids,
+    assemble_token_aligned_full_prefill_input,
+    assemble_token_aligned_full_prefill_input_ids,
     build_full_prefill_content,
     get_cacheblend_mistral_instruct_config,
 )
@@ -37,6 +39,8 @@ __all__ = [
     "assemble_cacheblend_mistral_input_ids",
     "assemble_full_prefill_input_from_prompt",
     "assemble_full_prefill_input_ids",
+    "assemble_token_aligned_full_prefill_input",
+    "assemble_token_aligned_full_prefill_input_ids",
     "build_cacheblend_prompt",
     "build_cacheblend_prompts",
     "build_full_prefill_content",
