@@ -42,7 +42,10 @@ INLINE_SAMPLE: list[dict[str, Any]] = [
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Check token layout alignment between full prefill and naive KV reuse."
+        description=(
+            "Smoke test token-aligned full recompute greedy generation and its layout "
+            "alignment with naive KV reuse."
+        )
     )
     parser.add_argument(
         "--input",
@@ -69,7 +72,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--run-generation",
         action="store_true",
-        help="Also run token-aligned full prefill greedy and naive reuse generation.",
+        help="Also run token-aligned full recompute greedy and naive reuse generation.",
     )
     return parser.parse_args()
 
@@ -114,7 +117,7 @@ def main() -> None:
         print(f"doc_token_count: {doc_token_count}")
         print(f"q_ids_length: {len(tokenized.q_ids)}")
         print(f"token_aligned_input_ids_length: {len(token_aligned_input_ids)}")
-        print("layout_alignment: ok")
+        print("token_aligned_layout: ok")
 
         if bundle is None:
             continue
@@ -142,7 +145,7 @@ def main() -> None:
             "token-aligned full-prefill method must use the checked input ids."
         )
 
-        print(f"full_prefill_output_text: {full_result.generation.output_text!r}")
+        print(f"token_aligned_full_recompute_output_text: {full_result.generation.output_text!r}")
         print(f"naive_reuse_output_text: {naive_result.generation.output_text!r}")
         print(f"naive_reuse_assembled_kv_seq_len: {assembled_kv_seq_len}")
 

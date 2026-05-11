@@ -1,6 +1,8 @@
 # Python bytecode and caches
 __pycache__/
 *.py[cod]
+*.pyc
+*.pyo
 *$py.class
 .pytest_cache/
 .mypy_cache/

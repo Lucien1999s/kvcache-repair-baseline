@@ -4,10 +4,7 @@ from contextflow.runtime.hf_cached_generation import (
     infer_past_sequence_length,
 )
 from contextflow.runtime.hf_generation import (
-    HFGenerationConfig,
-    HFGenerationResult,
     HFModelBundle,
-    generate_from_input_ids,
     load_hf_causal_lm,
 )
 from contextflow.runtime.hf_greedy_generation import (
@@ -17,12 +14,9 @@ from contextflow.runtime.hf_greedy_generation import (
 
 __all__ = [
     "HFCachedGenerationResult",
-    "HFGenerationConfig",
-    "HFGenerationResult",
     "HFModelBundle",
     "HFGreedyGenerationResult",
     "generate_with_past_key_values",
-    "generate_from_input_ids",
     "generate_greedy_from_input_ids",
     "infer_past_sequence_length",
     "load_hf_causal_lm",
