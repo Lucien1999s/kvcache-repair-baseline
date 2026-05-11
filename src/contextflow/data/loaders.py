@@ -140,6 +140,13 @@ def parse_musique_example(raw_example: dict[str, Any]) -> InputExample:
 
     if is_cacheblend_prepared_example(raw_example):
         return normalize_prepared_input_example(raw_example, dataset_key="musique")
+    if "question" not in raw_example and "query" in raw_example:
+        raise ValueError(
+            "This looks like a CoRAG-style MuSiQue row with query/context_doc_ids, not raw "
+            "MuSiQue paragraphs. It does not contain passage text for InputExample.ctxs. "
+            "Use configs/datasets/musique.yaml with a MuSiQue source that exposes "
+            "question/answer/paragraphs, then rerun scripts/prepare_dataset.py."
+        )
 
     question = require_string_field(raw_example, "question")
     answers = normalize_answers(raw_example, keys=("answers", "answer"))
@@ -180,15 +187,11 @@ def parse_2wiki_example(raw_example: dict[str, Any]) -> InputExample:
     question = require_string_field(raw_example, "question")
     answers = normalize_answers(raw_example, keys=("answers", "answer", "golden_answers"))
     raw_contexts = raw_example.get("context")
+    if raw_contexts is None and isinstance(raw_example.get("metadata"), dict):
+        raw_contexts = raw_example["metadata"].get("context")
     if raw_contexts is None:
         raw_contexts = raw_example.get("ctxs", [])
-    if not isinstance(raw_contexts, list):
-        raise ValueError("2wiki example context/ctxs must be a list.")
-
-    ctxs = [
-        normalize_2wiki_context(context, context_index)
-        for context_index, context in enumerate(raw_contexts)
-    ]
+    ctxs = normalize_2wiki_contexts(raw_contexts)
 
     return InputExample(
         question=question,
@@ -305,6 +308,34 @@ def normalize_2wiki_context(raw_context: Any, context_index: int) -> Context:
         f"2wiki context {context_index} must be an object or [title, sentences], "
         f"got {type(raw_context).__name__}."
     )
+
+
+def normalize_2wiki_contexts(raw_contexts: Any) -> list[Context]:
+    if isinstance(raw_contexts, dict):
+        titles = raw_contexts.get("title")
+        sentences = raw_contexts.get("sentences")
+        if sentences is None:
+            sentences = raw_contexts.get("content")
+        if not isinstance(titles, list) or not isinstance(sentences, list):
+            raise ValueError(
+                "2wiki context dict must contain title list and sentences/content list."
+            )
+        if len(titles) != len(sentences):
+            raise ValueError(
+                "2wiki context title and sentences/content lists must have the same length."
+            )
+        return [
+            normalize_2wiki_context([title, context_sentences], context_index)
+            for context_index, (title, context_sentences) in enumerate(zip(titles, sentences))
+        ]
+
+    if isinstance(raw_contexts, list):
+        return [
+            normalize_2wiki_context(context, context_index)
+            for context_index, context in enumerate(raw_contexts)
+        ]
+
+    raise ValueError("2wiki example context/ctxs must be a list or Hotpot-style context dict.")
 
 
 def normalize_answers(raw_example: dict[str, Any], keys: tuple[str, ...]) -> list[str]:

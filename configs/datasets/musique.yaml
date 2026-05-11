@@ -1,8 +1,7 @@
 dataset_key: musique
 source:
   type: huggingface
-  name: corag/multihopqa
-  config: musique
+  name: awinml/musique
   split: validation
 output:
   local_path: data/raw/musique/validation.jsonl

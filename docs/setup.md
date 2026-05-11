@@ -39,6 +39,11 @@ python scripts/prepare_dataset.py --config configs/datasets/musique.yaml --overw
 python scripts/prepare_dataset.py --config configs/datasets/2wiki.yaml --overwrite
 ```
 
+The MuSiQue config should point to a source with `question`, `answer`, and
+`paragraphs` fields. Do not use CoRAG-style `query/context_doc_ids` exports for
+this loader unless you also provide passage text, because `context_doc_ids`
+alone cannot become `InputExample.ctxs`.
+
 The script writes local JSONL only. It does not run retrieval, reranking,
 chunking, tokenization, or model execution.
 
