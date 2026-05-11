@@ -77,7 +77,9 @@ def run_model_family_partial_repair(
     num_layers: int,
     attention_mask: Any,
 ) -> tuple[Any, tuple[tuple[Any, Any], ...]]:
-    if model_family == "gpt2":
+    normalized_model_family = model_family.lower()
+
+    if normalized_model_family == "gpt2":
         from contextflow.repair.adapters.gpt2 import (
             run_gpt2_partial_layers,
             validate_gpt2_like_model,
@@ -94,9 +96,43 @@ def run_model_family_partial_repair(
             attention_mask=attention_mask,
         )
 
+    if normalized_model_family == "mistral":
+        from contextflow.repair.adapters.mistral import (
+            run_mistral_partial_layers,
+            validate_mistral_like_model,
+        )
+
+        validate_mistral_like_model(model)
+        return run_mistral_partial_layers(
+            model=model,
+            selected_hidden_states=selected_hidden_states,
+            selected_indices=selected_indices,
+            past_key_values=reuse_past_key_values,
+            start_layer_index=0,
+            end_layer_index=num_layers,
+            attention_mask=attention_mask,
+        )
+
+    if normalized_model_family == "qwen2":
+        from contextflow.repair.adapters.qwen2 import (
+            run_qwen2_partial_layers,
+            validate_qwen2_like_model,
+        )
+
+        validate_qwen2_like_model(model)
+        return run_qwen2_partial_layers(
+            model=model,
+            selected_hidden_states=selected_hidden_states,
+            selected_indices=selected_indices,
+            past_key_values=reuse_past_key_values,
+            start_layer_index=0,
+            end_layer_index=num_layers,
+            attention_mask=attention_mask,
+        )
+
     raise NotImplementedError(
         f"Unsupported model_family={model_family!r}. CacheBlend-style repair currently "
-        "supports only model_family='gpt2'."
+        "supports model_family in {'gpt2', 'mistral', 'qwen2'}."
     )
 
 
@@ -120,6 +156,7 @@ def run_cacheblend_style_repair_generation(
     if initial_top_k <= 0 or top_k <= 0:
         raise ValueError("initial_top_k and top_k must be positive.")
 
+    model_family = model_family.lower()
     total_start = time.perf_counter()
     repair_start = total_start
 
@@ -161,7 +198,8 @@ def run_cacheblend_style_repair_generation(
         seq_len=doc_total_len,
     )
 
-    # Current runtime primitive supports one fixed selected index set across layers.
+    # Current runtime primitive uses one fixed selected index set across layers.
+    # Per-layer variable selected-index runtime repair is not implemented yet.
     runtime_selected_indices = selected_indices_by_layer[0]
     doc_attention_mask = torch.ones((1, doc_total_len), dtype=torch.long, device=device)
     selected_hidden_states = full_outputs.hidden_states[0][:, runtime_selected_indices, :]
@@ -190,6 +228,7 @@ def run_cacheblend_style_repair_generation(
     metadata = {
         "model_family": model_family,
         "runtime_selected_indices": runtime_selected_indices,
+        "runtime_selection_mode": "fixed_layer0_selected_indices",
         "selected_indices_by_layer": selected_indices_by_layer,
         "layer_selected_counts": [
             len(selected_indices_by_layer[layer_index]) for layer_index in range(num_layers)
