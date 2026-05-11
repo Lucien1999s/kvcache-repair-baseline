@@ -13,5 +13,11 @@ dependencies = [
     "transformers",
 ]
 
+[project.optional-dependencies]
+datasets = [
+    "datasets",
+    "pyyaml",
+]
+
 [tool.setuptools.packages.find]
 where = ["src"]

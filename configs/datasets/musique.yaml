@@ -1,0 +1,10 @@
+dataset_key: musique
+source:
+  type: huggingface
+  name: corag/multihopqa
+  config: musique
+  split: validation
+output:
+  local_path: data/raw/musique/validation.jsonl
+  format: jsonl
+sample_size: null

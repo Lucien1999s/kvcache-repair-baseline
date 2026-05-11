@@ -38,7 +38,9 @@ results/*
 /wandb/
 
 # Large local artifacts
-/data/
+/data/raw/
+/data/processed/
+/data/**/*.jsonl
 /datasets/
 /checkpoints/
 /models/
