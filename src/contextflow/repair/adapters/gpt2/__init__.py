@@ -10,6 +10,11 @@ from contextflow.repair.adapters.gpt2.patch import (
     patch_gpt2_layers_with_gradual_hkvd_tokens,
     patch_gpt2_layers_with_hkvd_tokens,
 )
+from contextflow.repair.adapters.gpt2.runtime import (
+    run_gpt2_partial_layers,
+    run_gpt2_partial_layer,
+    run_gpt2_selected_attention,
+)
 
 __all__ = [
     "compute_gpt2_layer_qkv",
@@ -19,5 +24,8 @@ __all__ = [
     "patch_gpt2_layers_with_hkvd_tokens",
     "patch_selected_kv",
     "recompute_and_patch_gpt2_layer_kv",
+    "run_gpt2_partial_layer",
+    "run_gpt2_partial_layers",
+    "run_gpt2_selected_attention",
     "validate_gpt2_like_model",
 ]
