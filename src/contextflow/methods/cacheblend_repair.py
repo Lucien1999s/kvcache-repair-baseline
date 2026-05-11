@@ -41,6 +41,91 @@ def slice_past_key_values_prefix(past_key_values: Any, seq_len: int) -> tuple[tu
     return tuple(sliced_layers)
 
 
+def index_select_sequence(tensor: Any, indices: list[int]) -> Any:
+    index_tensor = torch.tensor(indices, dtype=torch.long, device=tensor.device)
+    return tensor.index_select(dim=tensor.ndim - 2, index=index_tensor)
+
+
+def max_abs_diff(left: Any, right: Any) -> float:
+    if left.numel() == 0:
+        return 0.0
+    return float((left - right).abs().max().detach().cpu())
+
+
+def layer_kv_max_diff_at_indices(
+    layer_a: tuple[Any, Any],
+    layer_b: tuple[Any, Any],
+    indices: list[int],
+) -> float:
+    key_a, value_a = layer_a[0], layer_a[1]
+    key_b, value_b = layer_b[0], layer_b[1]
+    key_diff = max_abs_diff(
+        index_select_sequence(key_a, indices),
+        index_select_sequence(key_b, indices),
+    )
+    value_diff = max_abs_diff(
+        index_select_sequence(value_a, indices),
+        index_select_sequence(value_b, indices),
+    )
+    return max(key_diff, value_diff)
+
+
+def resolve_unselected_indices(seq_len: int, selected_indices: list[int]) -> list[int]:
+    selected = set(selected_indices)
+    return [token_index for token_index in range(seq_len) if token_index not in selected]
+
+
+def compute_repair_diagnostics(
+    reuse_past_key_values: tuple[tuple[Any, Any], ...],
+    repaired_past_key_values: tuple[tuple[Any, Any], ...],
+    full_past_key_values: tuple[tuple[Any, Any], ...],
+    runtime_selected_indices: list[int],
+    seq_len: int,
+) -> dict[str, dict[int, float] | dict[int, bool]]:
+    if len(reuse_past_key_values) != len(repaired_past_key_values):
+        raise ValueError("reuse and repaired KV must have the same layer count.")
+    if len(reuse_past_key_values) != len(full_past_key_values):
+        raise ValueError("reuse and full KV must have the same layer count.")
+
+    unselected_indices = resolve_unselected_indices(seq_len, runtime_selected_indices)
+    selected_before: dict[int, float] = {}
+    selected_after: dict[int, float] = {}
+    unselected_after_vs_reuse: dict[int, float] = {}
+    shape_matches: dict[int, bool] = {}
+
+    for layer_index, (reuse_layer_kv, repaired_layer_kv, full_layer_kv) in enumerate(
+        zip(reuse_past_key_values, repaired_past_key_values, full_past_key_values)
+    ):
+        reuse_key, reuse_value = reuse_layer_kv[0], reuse_layer_kv[1]
+        repaired_key, repaired_value = repaired_layer_kv[0], repaired_layer_kv[1]
+        selected_before[layer_index] = layer_kv_max_diff_at_indices(
+            reuse_layer_kv,
+            full_layer_kv,
+            runtime_selected_indices,
+        )
+        selected_after[layer_index] = layer_kv_max_diff_at_indices(
+            repaired_layer_kv,
+            full_layer_kv,
+            runtime_selected_indices,
+        )
+        unselected_after_vs_reuse[layer_index] = layer_kv_max_diff_at_indices(
+            repaired_layer_kv,
+            reuse_layer_kv,
+            unselected_indices,
+        )
+        shape_matches[layer_index] = (
+            tuple(repaired_key.shape) == tuple(reuse_key.shape)
+            and tuple(repaired_value.shape) == tuple(reuse_value.shape)
+        )
+
+    return {
+        "selected_kv_max_diff_before_by_layer": selected_before,
+        "selected_kv_max_diff_after_by_layer": selected_after,
+        "unselected_kv_max_diff_after_vs_reuse_by_layer": unselected_after_vs_reuse,
+        "repaired_kv_shape_matches_reuse_by_layer": shape_matches,
+    }
+
+
 def validate_gradual_selection(
     selected_indices_by_layer: dict[int, list[int]],
     num_layers: int,
@@ -144,6 +229,7 @@ def run_cacheblend_style_repair_generation(
     initial_top_k: int = 10,
     top_k: int = 5,
     model_family: str = "gpt2",
+    include_repair_diagnostics: bool = False,
 ) -> CacheBlendRepairResult:
     """Run CacheBlend-style repaired-KV greedy generation.
 
@@ -212,6 +298,17 @@ def run_cacheblend_style_repair_generation(
         num_layers=num_layers,
         attention_mask=doc_attention_mask,
     )
+    repair_diagnostics = (
+        compute_repair_diagnostics(
+            reuse_past_key_values=reuse_doc_kv,
+            repaired_past_key_values=repaired_doc_kv,
+            full_past_key_values=full_doc_kv,
+            runtime_selected_indices=runtime_selected_indices,
+            seq_len=doc_total_len,
+        )
+        if include_repair_diagnostics
+        else {}
+    )
     repair_latency_seconds = time.perf_counter() - repair_start
 
     decode_start = time.perf_counter()
@@ -237,6 +334,7 @@ def run_cacheblend_style_repair_generation(
         "decode_latency_seconds": decode_latency_seconds,
         "total_latency_seconds": total_latency_seconds,
     }
+    metadata.update(repair_diagnostics)
     return CacheBlendRepairResult(
         generated_ids=generation.generated_ids,
         output_text=generation.output_text,
