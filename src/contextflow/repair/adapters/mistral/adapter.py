@@ -43,18 +43,36 @@ def get_mistral_layer(model: Any, layer_index: int) -> Any:
 
 def infer_mistral_attention_geometry(layer: Any) -> tuple[int, int, int, int]:
     attn = layer.self_attn
+    config = getattr(attn, "config", None)
     num_heads = getattr(attn, "num_heads", None)
+    if num_heads is None and config is not None:
+        num_heads = getattr(config, "num_attention_heads", None)
+
     num_key_value_heads = getattr(attn, "num_key_value_heads", None)
+    if num_key_value_heads is None and config is not None:
+        num_key_value_heads = getattr(config, "num_key_value_heads", None)
+
     head_dim = getattr(attn, "head_dim", None)
+    if head_dim is None and config is not None:
+        head_dim = getattr(config, "head_dim", None)
 
     if num_heads is None:
-        raise ValueError("Expected Mistral attention module to expose num_heads.")
+        raise ValueError(
+            "Expected Mistral attention module/config to expose num_heads or "
+            "num_attention_heads."
+        )
     if num_key_value_heads is None:
-        raise ValueError("Expected Mistral attention module to expose num_key_value_heads.")
+        raise ValueError(
+            "Expected Mistral attention module/config to expose num_key_value_heads."
+        )
     if head_dim is None:
         hidden_size = getattr(attn, "hidden_size", None)
+        if hidden_size is None and config is not None:
+            hidden_size = getattr(config, "hidden_size", None)
         if hidden_size is None:
-            raise ValueError("Expected Mistral attention module to expose head_dim or hidden_size.")
+            raise ValueError(
+                "Expected Mistral attention module/config to expose head_dim or hidden_size."
+            )
         head_dim = int(hidden_size) // int(num_heads)
 
     num_heads = int(num_heads)
