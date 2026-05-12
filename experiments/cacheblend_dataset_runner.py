@@ -234,8 +234,14 @@ def run_cacheblend_repair(
         prediction_parser=prediction_parser,
     )
     metadata = result.metadata
+    repair_plan_metadata = metadata.get("repair_plan_metadata", {})
     method_record.update(
         {
+            "repair_plan_strategy": metadata.get("repair_plan_strategy"),
+            "selection_latency_seconds": repair_plan_metadata.get("selection_latency_seconds"),
+            "uses_full_recompute_reference": repair_plan_metadata.get(
+                "uses_full_recompute_reference"
+            ),
             "repair_latency_seconds": metadata.get("repair_latency_seconds"),
             "decode_latency_seconds": metadata.get("decode_latency_seconds"),
             "runtime_selected_count": len(metadata.get("runtime_selected_indices", [])),

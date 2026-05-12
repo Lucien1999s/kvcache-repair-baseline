@@ -1,5 +1,7 @@
 from contextflow.methods.cacheblend_repair import (
+    CacheBlendRepairPlan,
     CacheBlendRepairResult,
+    prepare_cacheblend_repair_plan,
     run_cacheblend_style_repair_generation,
 )
 from contextflow.methods.full_recompute import (
@@ -10,8 +12,10 @@ from contextflow.methods.naive_reuse import NaiveReuseResult, run_naive_reuse_ge
 
 __all__ = [
     "FullRecomputeGreedyResult",
+    "CacheBlendRepairPlan",
     "CacheBlendRepairResult",
     "NaiveReuseResult",
+    "prepare_cacheblend_repair_plan",
     "run_cacheblend_style_repair_generation",
     "run_token_aligned_full_recompute_greedy_generation",
     "run_naive_reuse_generation",
