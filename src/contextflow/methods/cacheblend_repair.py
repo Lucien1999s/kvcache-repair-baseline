@@ -8,7 +8,12 @@ import torch
 
 from contextflow.data.assembly import assemble_token_aligned_full_prefill_input_ids
 from contextflow.data.schema import TokenizedExample
-from contextflow.kv_cache import assemble_chunk_kvs, precompute_doc_chunk_kvs
+from contextflow.kv_cache import (
+    assemble_chunk_kvs,
+    correct_doc_chunk_kvs_for_model_family,
+    precompute_doc_chunk_kvs,
+    rope_position_correction_enabled,
+)
 from contextflow.kv_cache.precompute import infer_model_input_device, normalize_past_key_values
 from contextflow.repair.cacheblend_selector import (
     compute_kv_deviation,
@@ -366,6 +371,7 @@ def _prepare_cacheblend_repair_plan_and_artifacts(
     tokenized_example: TokenizedExample,
     initial_top_k: int = 10,
     top_k: int = 5,
+    model_family: str = "gpt2",
 ) -> CacheBlendRepairPlanningArtifacts:
     if initial_top_k <= 0 or top_k <= 0:
         raise ValueError("initial_top_k and top_k must be positive.")
@@ -391,6 +397,11 @@ def _prepare_cacheblend_repair_plan_and_artifacts(
     full_past_key_values = normalize_past_key_values(full_outputs.past_key_values)
     full_doc_kv = slice_past_key_values_prefix(full_past_key_values, seq_len=doc_total_len)
     chunk_kvs = precompute_doc_chunk_kvs(model, tokenized_example)
+    chunk_kvs = correct_doc_chunk_kvs_for_model_family(
+        model=model,
+        chunk_kvs=chunk_kvs,
+        model_family=model_family,
+    )
     reuse_doc_kv = assemble_chunk_kvs(chunk_kvs)
     deviations = compute_kv_deviation(reuse_doc_kv, full_doc_kv)
     selected_indices_by_layer = select_gradual_hkvd_tokens_by_layer(
@@ -406,6 +417,11 @@ def _prepare_cacheblend_repair_plan_and_artifacts(
         initial_top_k=initial_top_k,
         top_k=top_k,
         planning_latency_seconds=planning_latency_seconds,
+    )
+    applies_rope_correction = rope_position_correction_enabled(model_family)
+    plan_metadata["rope_position_correction_applied"] = applies_rope_correction
+    plan_metadata["reuse_doc_kv_position_basis"] = (
+        "full_context_absolute" if applies_rope_correction else "native"
     )
     plan = build_cacheblend_repair_plan(
         selected_indices_by_layer=selected_indices_by_layer,
@@ -425,12 +441,14 @@ def prepare_cacheblend_repair_plan(
     tokenized_example: TokenizedExample,
     initial_top_k: int = 10,
     top_k: int = 5,
+    model_family: str = "gpt2",
 ) -> CacheBlendRepairPlan:
     """Prepare an oracle-HKVD repair plan for CacheBlend-style partial repair.
 
     This planner intentionally uses full recompute KV as a diagnostic reference.
     It should be measured separately from repair execution when reporting resource
-    numbers.
+    numbers. RoPE model families correct reused doc KVs into full-context
+    absolute positions before HKVD selection.
     """
 
     return _prepare_cacheblend_repair_plan_and_artifacts(
@@ -438,6 +456,7 @@ def prepare_cacheblend_repair_plan(
         tokenized_example=tokenized_example,
         initial_top_k=initial_top_k,
         top_k=top_k,
+        model_family=model_family,
     ).plan
 
 
@@ -446,12 +465,14 @@ def prepare_cacheblend_repair_plan_with_artifacts(
     tokenized_example: TokenizedExample,
     initial_top_k: int = 10,
     top_k: int = 5,
+    model_family: str = "gpt2",
 ) -> CacheBlendRepairPlanningArtifacts:
     """Prepare an oracle-HKVD repair plan plus reusable planning artifacts.
 
     Dataset-level diagnostics use this to measure planning as one phase and then
     reuse the assembled document KV during clean repair execution without
-    recomputing it.
+    recomputing it. Returned reuse_doc_kv is already position-corrected for
+    RoPE model families.
     """
 
     return _prepare_cacheblend_repair_plan_and_artifacts(
@@ -459,6 +480,7 @@ def prepare_cacheblend_repair_plan_with_artifacts(
         tokenized_example=tokenized_example,
         initial_top_k=initial_top_k,
         top_k=top_k,
+        model_family=model_family,
     )
 
 
@@ -609,11 +631,27 @@ def run_cacheblend_style_partial_repair_from_plan(
     model_family = model_family.lower()
     doc_input_ids = assemble_doc_input_ids(tokenized_example)
     validate_repair_plan_for_doc_input(repair_plan, doc_input_ids)
+    expected_rope_correction = rope_position_correction_enabled(model_family)
+    planned_rope_correction = repair_plan.metadata.get("rope_position_correction_applied")
+    if (
+        planned_rope_correction is not None
+        and bool(planned_rope_correction) != expected_rope_correction
+    ):
+        raise ValueError(
+            "repair_plan rope_position_correction_applied does not match model_family; "
+            f"plan has {planned_rope_correction}, model_family={model_family!r} "
+            f"expects {expected_rope_correction}."
+        )
 
     reuse_precompute_latency_seconds: float | None = None
     if reuse_past_key_values is None:
         reuse_precompute_start = time.perf_counter()
         chunk_kvs = precompute_doc_chunk_kvs(model, tokenized_example)
+        chunk_kvs = correct_doc_chunk_kvs_for_model_family(
+            model=model,
+            chunk_kvs=chunk_kvs,
+            model_family=model_family,
+        )
         reuse_doc_kv = assemble_chunk_kvs(chunk_kvs)
         reuse_precompute_latency_seconds = time.perf_counter() - reuse_precompute_start
         reuse_past_key_values_source = "computed_from_doc_chunks"
@@ -654,6 +692,7 @@ def run_cacheblend_style_partial_repair_from_plan(
         "planning_included_in_total_latency": False,
         "selected_initial_hidden_source": "model_embedding_path",
         "reuse_past_key_values_source": reuse_past_key_values_source,
+        "rope_position_correction_applied": expected_rope_correction,
         "reuse_precompute_latency_seconds": reuse_precompute_latency_seconds,
         "repair_latency_seconds": repair_latency_seconds,
     }
@@ -753,6 +792,7 @@ def run_cacheblend_style_repair_generation(
         tokenized_example=tokenized_example,
         initial_top_k=initial_top_k,
         top_k=top_k,
+        model_family=model_family,
     )
     plan = artifacts.plan
     execution_result = run_cacheblend_style_repair_generation_from_plan(

@@ -23,7 +23,12 @@ from contextflow.evaluation import (
     evaluate_qa_prediction,
     parse_cacheblend_generation,
 )
-from contextflow.kv_cache import assemble_chunk_kvs, precompute_doc_chunk_kvs
+from contextflow.kv_cache import (
+    assemble_chunk_kvs,
+    correct_doc_chunk_kvs_for_model_family,
+    precompute_doc_chunk_kvs,
+    rope_position_correction_enabled,
+)
 from contextflow.methods.cacheblend_repair import (
     CacheBlendRepairPlan,
     prepare_cacheblend_repair_plan_with_artifacts,
@@ -312,6 +317,9 @@ def build_cacheblend_repair_record(
             "uses_full_recompute_reference": repair_plan_metadata.get(
                 "uses_full_recompute_reference"
             ),
+            "rope_position_correction_applied": repair_plan_metadata.get(
+                "rope_position_correction_applied"
+            ),
             "execution_mode": "from_plan",
             "execution_uses_full_recompute_reference": partial_repair_metadata.get(
                 "execution_uses_full_recompute_reference"
@@ -362,8 +370,13 @@ def build_example_record(
     }
 
 
-def precompute_reuse_doc_kv(model: Any, tokenized_example: Any) -> Any:
+def precompute_reuse_doc_kv(model: Any, tokenized_example: Any, model_family: str) -> Any:
     chunk_kvs = precompute_doc_chunk_kvs(model, tokenized_example)
+    chunk_kvs = correct_doc_chunk_kvs_for_model_family(
+        model=model,
+        chunk_kvs=chunk_kvs,
+        model_family=model_family,
+    )
     return assemble_chunk_kvs(chunk_kvs)
 
 
@@ -406,6 +419,7 @@ def run_methods_for_example(
             lambda: precompute_reuse_doc_kv(
                 model=model,
                 tokenized_example=tokenized_example,
+                model_family=model_family,
             ),
             enable_profiling=enable_profiling,
         )
@@ -437,6 +451,9 @@ def run_methods_for_example(
                 "latency_seconds": naive_total_latency_seconds,
                 "peak_gpu_memory_mb": max_phase_peak_memory_mb(naive_phase_metrics),
                 "assembled_kv_layers": len(naive_reuse_kv),
+                "rope_position_correction_applied": rope_position_correction_enabled(
+                    model_family
+                ),
             }
         )
         method_records[METHOD_NAIVE_REUSE] = naive_record
@@ -448,6 +465,7 @@ def run_methods_for_example(
                 tokenized_example=tokenized_example,
                 initial_top_k=initial_top_k,
                 top_k=top_k,
+                model_family=model_family,
             ),
             enable_profiling=enable_profiling,
         )

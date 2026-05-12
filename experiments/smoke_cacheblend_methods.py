@@ -149,6 +149,7 @@ def main() -> None:
                 model=bundle.model,
                 tokenizer=bundle.tokenizer,
                 max_new_tokens=args.max_new_tokens,
+                model_family=args.model_family,
             ),
             synchronize_cuda=True,
             collect_peak_memory=True,
@@ -161,6 +162,9 @@ def main() -> None:
         method_records[METHOD_NAIVE_REUSE].update(naive_profile)
         method_records[METHOD_NAIVE_REUSE]["assembled_kv_layers"] = len(
             naive_result.assembled_past_key_values
+        )
+        method_records[METHOD_NAIVE_REUSE]["rope_position_correction_applied"] = (
+            naive_result.rope_position_correction_applied
         )
 
         repair_result, repair_profile = timed_call(
@@ -210,6 +214,10 @@ def main() -> None:
     assert repair_metadata["execution_mode"] == "from_plan"
     assert repair_metadata["execution_uses_full_recompute_reference"] is False
     assert repair_metadata["selected_initial_hidden_source"] == "model_embedding_path"
+    assert (
+        repair_metadata["rope_position_correction_applied"]
+        == naive_result.rope_position_correction_applied
+    )
     assert repair_metadata["execution_latency_seconds"] >= 0
     assert repair_metadata["planning_included_in_total_latency"] is True
     assert repair_metadata["layer_selected_counts"], "repair must report selected counts by layer."
