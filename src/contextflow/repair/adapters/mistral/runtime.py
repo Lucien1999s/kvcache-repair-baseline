@@ -216,7 +216,10 @@ def run_mistral_selected_attention(
     attention_value = repeat_mistral_kv(patched_value, num_key_value_groups)
 
     attn_weights = torch.matmul(selected_query, attention_key.transpose(-1, -2))
-    attn_weights = attn_weights / math.sqrt(float(head_dim))
+    scaling = getattr(layer.self_attn, "scaling", None)
+    if scaling is None:
+        scaling = 1.0 / math.sqrt(float(head_dim))
+    attn_weights = attn_weights * float(scaling)
     attn_weights = _apply_selected_causal_mask(attn_weights, selected_indices, layer)
     attn_weights = _apply_attention_mask(attn_weights, attention_mask)
     attn_weights = torch.nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32)

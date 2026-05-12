@@ -246,7 +246,8 @@ def main() -> None:
     ].items():
         selected_before = repair_metadata["selected_kv_max_diff_before_by_layer"][layer_index]
         assert selected_after <= selected_before + 1e-5, (
-            f"Layer {layer_index} selected K/V repair should not increase deviation."
+            f"Layer {layer_index} selected K/V repair should not increase deviation; "
+            f"before={selected_before}, after={selected_after}."
         )
 
     normalized_f1 = compute_normalized_score(

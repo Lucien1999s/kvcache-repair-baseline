@@ -90,7 +90,19 @@ def apply_qwen2_rope(query: Any, key: Any, cos: Any, sin: Any) -> tuple[Any, Any
     return (query * cos) + (_rotate_half(query) * sin), (key * cos) + (_rotate_half(key) * sin)
 
 
-def _apply_selected_causal_mask(attn_weights: Any, selected_indices: list[int]) -> Any:
+def _resolve_sliding_window(layer: Any) -> int | None:
+    sliding_window = getattr(layer.self_attn, "sliding_window", None)
+    if sliding_window is None:
+        config = getattr(layer.self_attn, "config", None)
+        if config is not None and getattr(config, "use_sliding_window", False):
+            sliding_window = getattr(config, "sliding_window", None)
+    if sliding_window is None:
+        return None
+    sliding_window = int(sliding_window)
+    return sliding_window if sliding_window > 0 else None
+
+
+def _apply_selected_causal_mask(attn_weights: Any, selected_indices: list[int], layer: Any) -> Any:
     import torch
 
     full_seq_len = int(attn_weights.shape[-1])
@@ -105,6 +117,9 @@ def _apply_selected_causal_mask(attn_weights: Any, selected_indices: list[int]) 
         device=attn_weights.device,
     ).view(1, 1, 1, full_seq_len)
     causal_mask = key_positions <= selected_positions
+    sliding_window = _resolve_sliding_window(layer)
+    if sliding_window is not None:
+        causal_mask = causal_mask & (key_positions > selected_positions - sliding_window)
     mask_value = torch.finfo(attn_weights.dtype).min
     return torch.where(causal_mask, attn_weights, mask_value)
 
@@ -202,8 +217,11 @@ def run_qwen2_selected_attention(
     attention_value = repeat_qwen2_kv(patched_value, num_key_value_groups)
 
     attn_weights = torch.matmul(selected_query, attention_key.transpose(-1, -2))
-    attn_weights = attn_weights / math.sqrt(float(head_dim))
-    attn_weights = _apply_selected_causal_mask(attn_weights, selected_indices)
+    scaling = getattr(layer.self_attn, "scaling", None)
+    if scaling is None:
+        scaling = 1.0 / math.sqrt(float(head_dim))
+    attn_weights = attn_weights * float(scaling)
+    attn_weights = _apply_selected_causal_mask(attn_weights, selected_indices, layer)
     attn_weights = _apply_attention_mask(attn_weights, attention_mask)
     attn_weights = torch.nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32)
     attn_weights = attn_weights.to(dtype=selected_query.dtype)
