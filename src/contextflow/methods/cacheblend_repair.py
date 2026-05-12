@@ -218,7 +218,7 @@ def compute_plan_diagnostic_metadata(
     selected_indices_by_layer: dict[int, list[int]],
     initial_top_k: int,
     top_k: int,
-    selection_latency_seconds: float,
+    planning_latency_seconds: float,
 ) -> dict[str, Any]:
     metadata: dict[str, Any] = {
         "diagnostic_source": "full_recompute_reference",
@@ -226,7 +226,7 @@ def compute_plan_diagnostic_metadata(
         "selection_algorithm": "gradual_hkvd",
         "initial_top_k": initial_top_k,
         "top_k": top_k,
-        "selection_latency_seconds": selection_latency_seconds,
+        "planning_latency_seconds": planning_latency_seconds,
         "deviation_max_by_layer": {},
         "deviation_mean_by_layer": {},
         "selected_deviation_max_by_layer": {},
@@ -290,7 +290,7 @@ def _prepare_cacheblend_repair_plan_and_artifacts(
     if initial_top_k <= 0 or top_k <= 0:
         raise ValueError("initial_top_k and top_k must be positive.")
 
-    selection_start = time.perf_counter()
+    planning_start = time.perf_counter()
     device = infer_model_input_device(model)
     full_input_ids = assemble_token_aligned_full_prefill_input_ids(tokenized_example)
     doc_total_len = sum(len(doc_ids) for doc_ids in tokenized_example.doc_chunk_ids)
@@ -322,13 +322,13 @@ def _prepare_cacheblend_repair_plan_and_artifacts(
         top_k=top_k,
     )
     num_layers = len(full_doc_kv)
-    selection_latency_seconds = time.perf_counter() - selection_start
+    planning_latency_seconds = time.perf_counter() - planning_start
     plan_metadata = compute_plan_diagnostic_metadata(
         deviations=deviations,
         selected_indices_by_layer=selected_indices_by_layer,
         initial_top_k=initial_top_k,
         top_k=top_k,
-        selection_latency_seconds=selection_latency_seconds,
+        planning_latency_seconds=planning_latency_seconds,
     )
     plan = build_cacheblend_repair_plan(
         selected_indices_by_layer=selected_indices_by_layer,

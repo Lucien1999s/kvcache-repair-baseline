@@ -201,7 +201,7 @@ def main() -> None:
     assert repair_metadata["repair_plan_strategy"] == "oracle_hkvd_gradual"
     assert repair_metadata["repair_plan_metadata"]["uses_full_recompute_reference"] is True
     assert repair_metadata["repair_plan_metadata"]["selection_algorithm"] == "gradual_hkvd"
-    assert repair_metadata["repair_plan_metadata"]["selection_latency_seconds"] >= 0
+    assert repair_metadata["repair_plan_metadata"]["planning_latency_seconds"] >= 0
     assert repair_metadata["layer_selected_counts"], "repair must report selected counts by layer."
     assert all(repair_metadata["repaired_kv_shape_matches_reuse_by_layer"].values()), (
         "repaired KV shapes must match reused KV shapes."

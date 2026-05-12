@@ -238,7 +238,7 @@ def run_cacheblend_repair(
     method_record.update(
         {
             "repair_plan_strategy": metadata.get("repair_plan_strategy"),
-            "selection_latency_seconds": repair_plan_metadata.get("selection_latency_seconds"),
+            "planning_latency_seconds": repair_plan_metadata.get("planning_latency_seconds"),
             "uses_full_recompute_reference": repair_plan_metadata.get(
                 "uses_full_recompute_reference"
             ),
