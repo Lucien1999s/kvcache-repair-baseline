@@ -202,6 +202,14 @@ def compute_repair_diagnostics(
     seq_len: int,
     selected_indices_by_layer: dict[int, list[int]] | None = None,
 ) -> dict[str, dict[int, float] | dict[int, bool]]:
+    """Compare reused/repaired doc KV against full recompute doc KV.
+
+    These values are diagnostics. With true per-layer partial repair, layers after
+    layer 0 consume hidden states propagated through mixed repaired/reused KV, so
+    selected KV deviation from full recompute is not guaranteed to decrease
+    monotonically at every layer.
+    """
+
     if len(reuse_past_key_values) != len(repaired_past_key_values):
         raise ValueError("reuse and repaired KV must have the same layer count.")
     if len(reuse_past_key_values) != len(full_past_key_values):
