@@ -1,5 +1,6 @@
 from contextflow.repair.adapters.qwen2.adapter import (
     compute_qwen2_layer_qkv,
+    compute_qwen2_selected_initial_hidden_states,
     get_qwen2_decoder,
     get_qwen2_layer,
     infer_qwen2_attention_geometry,
@@ -15,6 +16,7 @@ from contextflow.repair.adapters.qwen2.runtime import (
 
 __all__ = [
     "compute_qwen2_layer_qkv",
+    "compute_qwen2_selected_initial_hidden_states",
     "get_qwen2_decoder",
     "get_qwen2_layer",
     "infer_qwen2_attention_geometry",

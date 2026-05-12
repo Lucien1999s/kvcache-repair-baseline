@@ -66,7 +66,6 @@ class CacheBlendRepairResult:
 @dataclass(slots=True)
 class CacheBlendRepairPlanningArtifacts:
     plan: CacheBlendRepairPlan
-    full_outputs: Any
     full_doc_kv: tuple[tuple[Any, Any], ...]
     reuse_doc_kv: tuple[tuple[Any, Any], ...]
 
@@ -115,6 +114,68 @@ def layer_kv_max_diff_at_indices(
 def resolve_unselected_indices(seq_len: int, selected_indices: list[int]) -> list[int]:
     selected = set(selected_indices)
     return [token_index for token_index in range(seq_len) if token_index not in selected]
+
+
+def assemble_doc_input_ids(tokenized_example: TokenizedExample) -> list[int]:
+    return [
+        token_id
+        for doc_chunk_ids in tokenized_example.doc_chunk_ids
+        for token_id in doc_chunk_ids
+    ]
+
+
+def validate_repair_plan_for_doc_input(
+    plan: CacheBlendRepairPlan,
+    doc_input_ids: list[int],
+) -> None:
+    if plan.doc_total_len != len(doc_input_ids):
+        raise ValueError(
+            "repair_plan.doc_total_len must match concatenated document token length; "
+            f"got {plan.doc_total_len} and {len(doc_input_ids)}."
+        )
+    validate_gradual_selection(
+        plan.selected_indices_by_layer,
+        num_layers=plan.num_layers,
+        seq_len=plan.doc_total_len,
+    )
+    if plan.runtime_selected_indices != sorted(plan.runtime_selected_indices):
+        raise ValueError("repair_plan.runtime_selected_indices must be sorted.")
+    invalid = [
+        index
+        for index in plan.runtime_selected_indices
+        if index < 0 or index >= plan.doc_total_len
+    ]
+    if invalid:
+        raise ValueError(
+            "repair_plan.runtime_selected_indices contains invalid indices: "
+            f"{invalid}."
+        )
+
+
+def validate_reuse_past_key_values_for_plan(
+    past_key_values: Any,
+    plan: CacheBlendRepairPlan,
+) -> tuple[tuple[Any, Any], ...]:
+    normalized_past_key_values = normalize_past_key_values(past_key_values)
+    if len(normalized_past_key_values) != plan.num_layers:
+        raise ValueError(
+            "reuse_past_key_values layer count must match repair plan; "
+            f"got {len(normalized_past_key_values)} and {plan.num_layers}."
+        )
+
+    for layer_index, layer_kv in enumerate(normalized_past_key_values):
+        key, value = layer_kv[0], layer_kv[1]
+        if int(key.shape[-2]) != plan.doc_total_len:
+            raise ValueError(
+                f"Layer {layer_index} reuse key seq_len must match repair plan doc_total_len; "
+                f"got {key.shape[-2]} and {plan.doc_total_len}."
+            )
+        if int(value.shape[-2]) != plan.doc_total_len:
+            raise ValueError(
+                f"Layer {layer_index} reuse value seq_len must match repair plan "
+                f"doc_total_len; got {value.shape[-2]} and {plan.doc_total_len}."
+            )
+    return normalized_past_key_values
 
 
 def compute_repair_diagnostics(
@@ -254,7 +315,9 @@ def build_cacheblend_repair_plan(
     selected_indices_by_layer: dict[int, list[int]],
     doc_total_len: int,
     num_layers: int,
-    metadata: dict[str, Any],
+    metadata: dict[str, Any] | None = None,
+    strategy: str = "oracle_hkvd_gradual",
+    runtime_selection_mode: str = "fixed_layer0_selected_indices",
 ) -> CacheBlendRepairPlan:
     validate_gradual_selection(
         selected_indices_by_layer,
@@ -275,9 +338,9 @@ def build_cacheblend_repair_plan(
         ],
         doc_total_len=doc_total_len,
         num_layers=num_layers,
-        strategy="oracle_hkvd_gradual",
-        runtime_selection_mode="fixed_layer0_selected_indices",
-        metadata=metadata,
+        strategy=strategy,
+        runtime_selection_mode=runtime_selection_mode,
+        metadata=dict(metadata or {}),
     )
 
 
@@ -303,11 +366,8 @@ def _prepare_cacheblend_repair_plan_and_artifacts(
         full_outputs = model(
             input_ids=full_input_tensor,
             attention_mask=full_attention_mask,
-            output_hidden_states=True,
             use_cache=True,
         )
-    if full_outputs.hidden_states is None:
-        raise RuntimeError("Model did not return hidden_states for repair diagnostics.")
     if full_outputs.past_key_values is None:
         raise RuntimeError("Model did not return past_key_values for repair diagnostics.")
 
@@ -338,7 +398,6 @@ def _prepare_cacheblend_repair_plan_and_artifacts(
     )
     return CacheBlendRepairPlanningArtifacts(
         plan=plan,
-        full_outputs=full_outputs,
         full_doc_kv=full_doc_kv,
         reuse_doc_kv=reuse_doc_kv,
     )
@@ -363,6 +422,64 @@ def prepare_cacheblend_repair_plan(
         initial_top_k=initial_top_k,
         top_k=top_k,
     ).plan
+
+
+def compute_model_family_selected_initial_hidden_states(
+    model: Any,
+    model_family: str,
+    doc_input_ids: list[int],
+    selected_indices: list[int],
+) -> Any:
+    if not doc_input_ids:
+        raise ValueError("doc_input_ids must be non-empty.")
+
+    normalized_model_family = model_family.lower()
+    device = infer_model_input_device(model)
+    input_tensor = torch.tensor([doc_input_ids], dtype=torch.long, device=device)
+
+    if normalized_model_family == "gpt2":
+        from contextflow.repair.adapters.gpt2 import (
+            compute_gpt2_selected_initial_hidden_states,
+            validate_gpt2_like_model,
+        )
+
+        validate_gpt2_like_model(model)
+        return compute_gpt2_selected_initial_hidden_states(
+            model=model,
+            input_ids=input_tensor,
+            selected_indices=selected_indices,
+        )
+
+    if normalized_model_family == "mistral":
+        from contextflow.repair.adapters.mistral import (
+            compute_mistral_selected_initial_hidden_states,
+            validate_mistral_like_model,
+        )
+
+        validate_mistral_like_model(model)
+        return compute_mistral_selected_initial_hidden_states(
+            model=model,
+            input_ids=input_tensor,
+            selected_indices=selected_indices,
+        )
+
+    if normalized_model_family == "qwen2":
+        from contextflow.repair.adapters.qwen2 import (
+            compute_qwen2_selected_initial_hidden_states,
+            validate_qwen2_like_model,
+        )
+
+        validate_qwen2_like_model(model)
+        return compute_qwen2_selected_initial_hidden_states(
+            model=model,
+            input_ids=input_tensor,
+            selected_indices=selected_indices,
+        )
+
+    raise NotImplementedError(
+        f"Unsupported model_family={model_family!r}. CacheBlend-style repair currently "
+        "supports model_family in {'gpt2', 'mistral', 'qwen2'}."
+    )
 
 
 def run_model_family_partial_repair(
@@ -433,6 +550,101 @@ def run_model_family_partial_repair(
     )
 
 
+def run_cacheblend_style_repair_generation_from_plan(
+    model: Any,
+    tokenizer: Any,
+    tokenized_example: TokenizedExample,
+    repair_plan: CacheBlendRepairPlan,
+    max_new_tokens: int = 16,
+    model_family: str = "gpt2",
+    reuse_past_key_values: Any | None = None,
+) -> CacheBlendRepairResult:
+    """Execute CacheBlend-style repair from a precomputed repair plan.
+
+    This execution path does not compute or inspect full-recompute reference KV.
+    If reuse_past_key_values is provided, repair/decode measurement can exclude both
+    oracle planning and reusable document-KV construction.
+    """
+
+    if max_new_tokens <= 0:
+        raise ValueError("max_new_tokens must be positive.")
+
+    model_family = model_family.lower()
+    total_start = time.perf_counter()
+    doc_input_ids = assemble_doc_input_ids(tokenized_example)
+    validate_repair_plan_for_doc_input(repair_plan, doc_input_ids)
+
+    reuse_precompute_latency_seconds: float | None = None
+    if reuse_past_key_values is None:
+        reuse_precompute_start = time.perf_counter()
+        chunk_kvs = precompute_doc_chunk_kvs(model, tokenized_example)
+        reuse_doc_kv = assemble_chunk_kvs(chunk_kvs)
+        reuse_precompute_latency_seconds = time.perf_counter() - reuse_precompute_start
+        reuse_past_key_values_source = "computed_from_doc_chunks"
+    else:
+        reuse_doc_kv = reuse_past_key_values
+        reuse_past_key_values_source = "provided"
+    reuse_doc_kv = validate_reuse_past_key_values_for_plan(reuse_doc_kv, repair_plan)
+
+    runtime_selected_indices = repair_plan.runtime_selected_indices
+    repair_start = time.perf_counter()
+    selected_hidden_states = compute_model_family_selected_initial_hidden_states(
+        model=model,
+        model_family=model_family,
+        doc_input_ids=doc_input_ids,
+        selected_indices=runtime_selected_indices,
+    )
+    doc_attention_mask = torch.ones(
+        (1, repair_plan.doc_total_len),
+        dtype=torch.long,
+        device=selected_hidden_states.device,
+    )
+    _, repaired_doc_kv = run_model_family_partial_repair(
+        model=model,
+        model_family=model_family,
+        selected_hidden_states=selected_hidden_states,
+        selected_indices=runtime_selected_indices,
+        reuse_past_key_values=reuse_doc_kv,
+        num_layers=repair_plan.num_layers,
+        attention_mask=doc_attention_mask,
+    )
+    repair_latency_seconds = time.perf_counter() - repair_start
+
+    decode_start = time.perf_counter()
+    generation = generate_with_past_key_values(
+        model=model,
+        tokenizer=tokenizer,
+        q_ids=tokenized_example.q_ids,
+        past_key_values=repaired_doc_kv,
+        max_new_tokens=max_new_tokens,
+    )
+    decode_latency_seconds = time.perf_counter() - decode_start
+    execution_latency_seconds = repair_latency_seconds + decode_latency_seconds
+    total_latency_seconds = time.perf_counter() - total_start
+
+    metadata = {
+        "model_family": model_family,
+        "execution_mode": "from_plan",
+        "execution_uses_full_recompute_reference": False,
+        "planning_included_in_total_latency": False,
+        "selected_initial_hidden_source": "model_embedding_path",
+        "reuse_past_key_values_source": reuse_past_key_values_source,
+        "reuse_precompute_latency_seconds": reuse_precompute_latency_seconds,
+        "repair_latency_seconds": repair_latency_seconds,
+        "decode_latency_seconds": decode_latency_seconds,
+        "execution_latency_seconds": execution_latency_seconds,
+        "total_latency_seconds": total_latency_seconds,
+    }
+    metadata.update(repair_plan.to_metadata())
+    return CacheBlendRepairResult(
+        generated_ids=generation.generated_ids,
+        output_text=generation.output_text,
+        generation=generation,
+        repaired_past_key_values=repaired_doc_kv,
+        metadata=metadata,
+    )
+
+
 def run_cacheblend_style_repair_generation(
     model: Any,
     tokenizer: Any,
@@ -463,56 +675,36 @@ def run_cacheblend_style_repair_generation(
         top_k=top_k,
     )
     plan = artifacts.plan
-    repair_start = time.perf_counter()
-    device = infer_model_input_device(model)
-    runtime_selected_indices = plan.runtime_selected_indices
-    doc_attention_mask = torch.ones((1, plan.doc_total_len), dtype=torch.long, device=device)
-    selected_hidden_states = artifacts.full_outputs.hidden_states[0][:, runtime_selected_indices, :]
-    _, repaired_doc_kv = run_model_family_partial_repair(
+    execution_result = run_cacheblend_style_repair_generation_from_plan(
         model=model,
+        tokenizer=tokenizer,
+        tokenized_example=tokenized_example,
+        repair_plan=plan,
+        max_new_tokens=max_new_tokens,
         model_family=model_family,
-        selected_hidden_states=selected_hidden_states,
-        selected_indices=runtime_selected_indices,
         reuse_past_key_values=artifacts.reuse_doc_kv,
-        num_layers=plan.num_layers,
-        attention_mask=doc_attention_mask,
     )
     repair_diagnostics = (
         compute_repair_diagnostics(
             reuse_past_key_values=artifacts.reuse_doc_kv,
-            repaired_past_key_values=repaired_doc_kv,
+            repaired_past_key_values=execution_result.repaired_past_key_values,
             full_past_key_values=artifacts.full_doc_kv,
-            runtime_selected_indices=runtime_selected_indices,
+            runtime_selected_indices=plan.runtime_selected_indices,
             seq_len=plan.doc_total_len,
         )
         if include_repair_diagnostics
         else {}
     )
-    repair_latency_seconds = time.perf_counter() - repair_start
-
-    decode_start = time.perf_counter()
-    generation = generate_with_past_key_values(
-        model=model,
-        tokenizer=tokenizer,
-        q_ids=tokenized_example.q_ids,
-        past_key_values=repaired_doc_kv,
-        max_new_tokens=max_new_tokens,
-    )
-    decode_latency_seconds = time.perf_counter() - decode_start
     total_latency_seconds = time.perf_counter() - total_start
 
-    metadata = {
-        "model_family": model_family,
-        "repair_latency_seconds": repair_latency_seconds,
-        "decode_latency_seconds": decode_latency_seconds,
-        "total_latency_seconds": total_latency_seconds,
-    }
-    metadata.update(plan.to_metadata())
+    metadata = dict(execution_result.metadata)
+    metadata["total_latency_seconds"] = total_latency_seconds
+    metadata["planning_included_in_total_latency"] = True
     metadata.update(repair_diagnostics)
     return CacheBlendRepairResult(
-        generated_ids=generation.generated_ids,
-        output_text=generation.output_text,
-        generation=generation,
-        repaired_past_key_values=repaired_doc_kv,
+        generated_ids=execution_result.generated_ids,
+        output_text=execution_result.output_text,
+        generation=execution_result.generation,
+        repaired_past_key_values=execution_result.repaired_past_key_values,
         metadata=metadata,
     )

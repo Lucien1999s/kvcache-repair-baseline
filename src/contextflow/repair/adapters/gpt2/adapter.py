@@ -32,6 +32,38 @@ def get_gpt2_layer(model: Any, layer_index: int) -> Any:
     return model.transformer.h[layer_index]
 
 
+def compute_gpt2_selected_initial_hidden_states(
+    model: Any,
+    input_ids: Any,
+    selected_indices: list[int],
+) -> Any:
+    """Compute GPT2 layer-0 input hidden states for selected absolute positions."""
+
+    import torch
+
+    validate_gpt2_like_model(model)
+    if input_ids.ndim != 2:
+        raise ValueError(f"input_ids must have shape [batch, seq_len], got {input_ids.shape}.")
+    if int(input_ids.shape[0]) != 1:
+        raise ValueError("Only batch size 1 is currently supported for selected repair.")
+
+    seq_len = int(input_ids.shape[1])
+    validate_selected_indices(selected_indices, seq_len)
+    transformer = model.transformer
+    if not hasattr(transformer, "wte") or not hasattr(transformer, "wpe"):
+        raise ValueError("Expected GPT2 transformer to expose wte and wpe embeddings.")
+
+    input_ids = input_ids.to(transformer.wte.weight.device)
+    position_ids = torch.arange(0, seq_len, dtype=torch.long, device=input_ids.device)
+    position_ids = position_ids.unsqueeze(0)
+    hidden_states = transformer.wte(input_ids) + transformer.wpe(position_ids)
+    if hasattr(transformer, "drop"):
+        hidden_states = transformer.drop(hidden_states)
+
+    index_tensor = torch.tensor(selected_indices, dtype=torch.long, device=input_ids.device)
+    return hidden_states.index_select(dim=1, index=index_tensor)
+
+
 def infer_gpt2_num_heads(layer: Any, hidden_dim: int) -> int:
     num_heads = getattr(layer.attn, "num_heads", None)
     if num_heads is None:

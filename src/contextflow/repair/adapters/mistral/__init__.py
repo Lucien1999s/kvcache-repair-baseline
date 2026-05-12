@@ -1,5 +1,6 @@
 from contextflow.repair.adapters.mistral.adapter import (
     compute_mistral_layer_qkv,
+    compute_mistral_selected_initial_hidden_states,
     get_mistral_decoder,
     get_mistral_layer,
     infer_mistral_attention_geometry,
@@ -15,6 +16,7 @@ from contextflow.repair.adapters.mistral.runtime import (
 
 __all__ = [
     "compute_mistral_layer_qkv",
+    "compute_mistral_selected_initial_hidden_states",
     "get_mistral_decoder",
     "get_mistral_layer",
     "infer_mistral_attention_geometry",

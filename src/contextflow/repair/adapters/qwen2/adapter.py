@@ -41,6 +41,33 @@ def get_qwen2_layer(model: Any, layer_index: int) -> Any:
     return layers[layer_index]
 
 
+def compute_qwen2_selected_initial_hidden_states(
+    model: Any,
+    input_ids: Any,
+    selected_indices: list[int],
+) -> Any:
+    """Compute Qwen2 layer-0 input hidden states for selected absolute positions."""
+
+    import torch
+
+    validate_qwen2_like_model(model)
+    if input_ids.ndim != 2:
+        raise ValueError(f"input_ids must have shape [batch, seq_len], got {input_ids.shape}.")
+    if int(input_ids.shape[0]) != 1:
+        raise ValueError("Only batch size 1 is currently supported for selected repair.")
+
+    seq_len = int(input_ids.shape[1])
+    validate_selected_indices(selected_indices, seq_len)
+    decoder = get_qwen2_decoder(model)
+    if not hasattr(decoder, "embed_tokens"):
+        raise ValueError("Expected Qwen2-like decoder to expose embed_tokens.")
+
+    input_ids = input_ids.to(decoder.embed_tokens.weight.device)
+    hidden_states = decoder.embed_tokens(input_ids)
+    index_tensor = torch.tensor(selected_indices, dtype=torch.long, device=input_ids.device)
+    return hidden_states.index_select(dim=1, index=index_tensor)
+
+
 def infer_qwen2_attention_geometry(layer: Any) -> tuple[int, int, int, int]:
     attn = layer.self_attn
     config = getattr(attn, "config", None)

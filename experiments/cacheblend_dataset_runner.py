@@ -23,7 +23,12 @@ from contextflow.evaluation import (
     evaluate_qa_prediction,
     parse_cacheblend_generation,
 )
-from contextflow.methods.cacheblend_repair import run_cacheblend_style_repair_generation
+from contextflow.kv_cache import assemble_chunk_kvs, precompute_doc_chunk_kvs
+from contextflow.methods.cacheblend_repair import (
+    CacheBlendRepairPlan,
+    prepare_cacheblend_repair_plan,
+    run_cacheblend_style_repair_generation_from_plan,
+)
 from contextflow.methods.full_recompute import run_token_aligned_full_recompute_greedy_generation
 from contextflow.methods.naive_reuse import run_naive_reuse_generation
 from contextflow.profiling import timed_call as profiling_timed_call
@@ -212,20 +217,21 @@ def run_cacheblend_repair(
     model: Any,
     tokenizer: Any,
     answers: list[str],
+    repair_plan: CacheBlendRepairPlan,
+    reuse_past_key_values: Any,
+    reuse_precompute_latency_seconds: float,
     max_new_tokens: int,
-    initial_top_k: int,
-    top_k: int,
     model_family: str,
     prediction_parser: str,
 ) -> dict[str, Any]:
-    result = run_cacheblend_style_repair_generation(
+    result = run_cacheblend_style_repair_generation_from_plan(
         model=model,
         tokenizer=tokenizer,
         tokenized_example=tokenized_example,
+        repair_plan=repair_plan,
         max_new_tokens=max_new_tokens,
-        initial_top_k=initial_top_k,
-        top_k=top_k,
         model_family=model_family,
+        reuse_past_key_values=reuse_past_key_values,
     )
     method_record = evaluate_method_output(
         generated_ids=result.generated_ids,
@@ -242,6 +248,16 @@ def run_cacheblend_repair(
             "uses_full_recompute_reference": repair_plan_metadata.get(
                 "uses_full_recompute_reference"
             ),
+            "execution_mode": metadata.get("execution_mode"),
+            "execution_uses_full_recompute_reference": metadata.get(
+                "execution_uses_full_recompute_reference"
+            ),
+            "planning_included_in_total_latency": metadata.get(
+                "planning_included_in_total_latency"
+            ),
+            "execution_latency_seconds": metadata.get("execution_latency_seconds"),
+            "reuse_precompute_latency_seconds": reuse_precompute_latency_seconds,
+            "reuse_past_key_values_source": metadata.get("reuse_past_key_values_source"),
             "repair_latency_seconds": metadata.get("repair_latency_seconds"),
             "decode_latency_seconds": metadata.get("decode_latency_seconds"),
             "runtime_selected_count": len(metadata.get("runtime_selected_indices", [])),
@@ -276,6 +292,12 @@ def build_example_record(
         "prediction_parser": prediction_parser,
         "methods": {},
     }
+
+
+def precompute_reuse_doc_kv(model: Any, tokenized_example: Any) -> tuple[Any, float]:
+    start = time.perf_counter()
+    chunk_kvs = precompute_doc_chunk_kvs(model, tokenized_example)
+    return assemble_chunk_kvs(chunk_kvs), time.perf_counter() - start
 
 
 def run_methods_for_example(
@@ -317,15 +339,26 @@ def run_methods_for_example(
             enable_profiling=enable_profiling,
         )
     if METHOD_CACHEBLEND_REPAIR in methods:
+        repair_plan = prepare_cacheblend_repair_plan(
+            model=model,
+            tokenized_example=tokenized_example,
+            initial_top_k=initial_top_k,
+            top_k=top_k,
+        )
+        reuse_past_key_values, reuse_precompute_latency_seconds = precompute_reuse_doc_kv(
+            model=model,
+            tokenized_example=tokenized_example,
+        )
         method_records[METHOD_CACHEBLEND_REPAIR] = run_timed_call(
             lambda: run_cacheblend_repair(
                 tokenized_example,
                 model=model,
                 tokenizer=tokenizer,
                 answers=answers,
+                repair_plan=repair_plan,
+                reuse_past_key_values=reuse_past_key_values,
+                reuse_precompute_latency_seconds=reuse_precompute_latency_seconds,
                 max_new_tokens=max_new_tokens,
-                initial_top_k=initial_top_k,
-                top_k=top_k,
                 model_family=model_family,
                 prediction_parser=prediction_parser,
             ),

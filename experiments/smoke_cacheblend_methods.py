@@ -186,6 +186,11 @@ def main() -> None:
         repair_metadata = repair_result.metadata
         method_records[METHOD_CACHEBLEND_REPAIR].update(
             {
+                "execution_mode": repair_metadata["execution_mode"],
+                "execution_uses_full_recompute_reference": repair_metadata[
+                    "execution_uses_full_recompute_reference"
+                ],
+                "execution_latency_seconds": repair_metadata["execution_latency_seconds"],
                 "repair_latency_seconds": repair_metadata["repair_latency_seconds"],
                 "decode_latency_seconds": repair_metadata["decode_latency_seconds"],
                 "runtime_selected_count": len(repair_metadata["runtime_selected_indices"]),
@@ -202,6 +207,11 @@ def main() -> None:
     assert repair_metadata["repair_plan_metadata"]["uses_full_recompute_reference"] is True
     assert repair_metadata["repair_plan_metadata"]["selection_algorithm"] == "gradual_hkvd"
     assert repair_metadata["repair_plan_metadata"]["planning_latency_seconds"] >= 0
+    assert repair_metadata["execution_mode"] == "from_plan"
+    assert repair_metadata["execution_uses_full_recompute_reference"] is False
+    assert repair_metadata["selected_initial_hidden_source"] == "model_embedding_path"
+    assert repair_metadata["execution_latency_seconds"] >= 0
+    assert repair_metadata["planning_included_in_total_latency"] is True
     assert repair_metadata["layer_selected_counts"], "repair must report selected counts by layer."
     assert all(repair_metadata["repaired_kv_shape_matches_reuse_by_layer"].values()), (
         "repaired KV shapes must match reused KV shapes."
