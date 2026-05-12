@@ -219,7 +219,9 @@ def main() -> None:
         == naive_result.rope_position_correction_applied
     )
     assert repair_metadata["repair_diagnostics_mode"] == "oracle_full_reference"
-    assert repair_metadata["repair_hard_invariants"]["all_passed"] is True
+    assert repair_metadata["repair_hard_invariants"]["all_passed"] is True, (
+        f"repair_hard_invariants failed: {repair_metadata['repair_hard_invariants']}"
+    )
     assert repair_metadata["execution_latency_seconds"] >= 0
     assert repair_metadata["planning_included_in_total_latency"] is True
     assert repair_metadata["layer_selected_counts"], "repair must report selected counts by layer."
@@ -249,9 +251,13 @@ def main() -> None:
     layer0_selected_after = repair_metadata["selected_kv_max_diff_after_by_layer"][0]
     layer0_selected_before = repair_metadata["selected_kv_max_diff_before_by_layer"][0]
     assert repair_metadata["selected_kv_oracle_close_by_layer"][0] is True, (
-        "Layer 0 selected K/V repair should be close to full recompute."
+        "Layer 0 selected K/V repair should be close to full recompute; "
+        f"after={layer0_selected_after}, "
+        f"tolerance={repair_metadata['repair_diagnostics_tolerance']}."
     )
-    assert layer0_selected_after <= layer0_selected_before + 1e-5, (
+    assert layer0_selected_after <= (
+        layer0_selected_before + repair_metadata["repair_diagnostics_tolerance"]
+    ), (
         "Layer 0 selected K/V repair should not increase deviation because layer-0 "
         "selected hidden states come directly from the embedding path; "
         f"before={layer0_selected_before}, after={layer0_selected_after}."

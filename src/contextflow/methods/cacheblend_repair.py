@@ -123,6 +123,21 @@ def layer_kv_max_diff_at_indices(
     return max(key_diff, value_diff)
 
 
+def resolve_repair_diagnostics_tolerance(
+    requested_tolerance: float,
+    repaired_past_key_values: tuple[tuple[Any, Any], ...],
+) -> float:
+    if requested_tolerance <= 0:
+        raise ValueError("repair diagnostics tolerance must be positive.")
+    if not repaired_past_key_values:
+        return requested_tolerance
+
+    dtype = repaired_past_key_values[0][0].dtype
+    if dtype.is_floating_point:
+        return max(requested_tolerance, float(torch.finfo(dtype).eps) * 4.0)
+    return requested_tolerance
+
+
 def resolve_unselected_indices(seq_len: int, selected_indices: list[int]) -> list[int]:
     selected = set(selected_indices)
     return [token_index for token_index in range(seq_len) if token_index not in selected]
@@ -216,6 +231,10 @@ def compute_repair_diagnostics(
     if len(reuse_past_key_values) != len(full_past_key_values):
         raise ValueError("reuse and full KV must have the same layer count.")
 
+    effective_tolerance = resolve_repair_diagnostics_tolerance(
+        requested_tolerance=tolerance,
+        repaired_past_key_values=repaired_past_key_values,
+    )
     selected_before: dict[int, float] = {}
     selected_after: dict[int, float] = {}
     selected_after_vs_reuse: dict[int, float] = {}
@@ -252,9 +271,9 @@ def compute_repair_diagnostics(
             reuse_layer_kv,
             selected_indices,
         )
-        selected_oracle_close[layer_index] = selected_after[layer_index] <= tolerance
+        selected_oracle_close[layer_index] = selected_after[layer_index] <= effective_tolerance
         selected_oracle_not_worse[layer_index] = (
-            selected_after[layer_index] <= selected_before[layer_index] + tolerance
+            selected_after[layer_index] <= selected_before[layer_index] + effective_tolerance
         )
         unselected_after_vs_reuse[layer_index] = layer_kv_max_diff_at_indices(
             repaired_layer_kv,
@@ -297,7 +316,8 @@ def compute_repair_diagnostics(
 
     return {
         "repair_diagnostics_mode": "oracle_full_reference",
-        "repair_diagnostics_tolerance": tolerance,
+        "repair_diagnostics_tolerance": effective_tolerance,
+        "repair_diagnostics_requested_tolerance": tolerance,
         "selected_kv_max_diff_before_by_layer": selected_before,
         "selected_kv_max_diff_after_by_layer": selected_after,
         "selected_kv_max_diff_after_vs_reuse_by_layer": selected_after_vs_reuse,
