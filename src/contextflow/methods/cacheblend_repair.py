@@ -201,7 +201,8 @@ def compute_repair_diagnostics(
     runtime_selected_indices: list[int],
     seq_len: int,
     selected_indices_by_layer: dict[int, list[int]] | None = None,
-) -> dict[str, dict[int, float] | dict[int, bool]]:
+    tolerance: float = 1e-5,
+) -> dict[str, Any]:
     """Compare reused/repaired doc KV against full recompute doc KV.
 
     These values are diagnostics. With true per-layer partial repair, layers after
@@ -217,8 +218,13 @@ def compute_repair_diagnostics(
 
     selected_before: dict[int, float] = {}
     selected_after: dict[int, float] = {}
+    selected_after_vs_reuse: dict[int, float] = {}
+    selected_oracle_close: dict[int, bool] = {}
+    selected_oracle_not_worse: dict[int, bool] = {}
     unselected_after_vs_reuse: dict[int, float] = {}
+    unselected_unchanged: dict[int, bool] = {}
     shape_matches: dict[int, bool] = {}
+    patch_scope_valid: dict[int, bool] = {}
 
     for layer_index, (reuse_layer_kv, repaired_layer_kv, full_layer_kv) in enumerate(
         zip(reuse_past_key_values, repaired_past_key_values, full_past_key_values)
@@ -241,21 +247,67 @@ def compute_repair_diagnostics(
             full_layer_kv,
             selected_indices,
         )
+        selected_after_vs_reuse[layer_index] = layer_kv_max_diff_at_indices(
+            repaired_layer_kv,
+            reuse_layer_kv,
+            selected_indices,
+        )
+        selected_oracle_close[layer_index] = selected_after[layer_index] <= tolerance
+        selected_oracle_not_worse[layer_index] = (
+            selected_after[layer_index] <= selected_before[layer_index] + tolerance
+        )
         unselected_after_vs_reuse[layer_index] = layer_kv_max_diff_at_indices(
             repaired_layer_kv,
             reuse_layer_kv,
             unselected_indices,
         )
+        unselected_unchanged[layer_index] = unselected_after_vs_reuse[layer_index] == 0.0
         shape_matches[layer_index] = (
             tuple(repaired_key.shape) == tuple(reuse_key.shape)
             and tuple(repaired_value.shape) == tuple(reuse_value.shape)
         )
+        patch_scope_valid[layer_index] = (
+            shape_matches[layer_index] and unselected_unchanged[layer_index]
+        )
+
+    if selected_indices_by_layer is None:
+        gradual_selected_sets_valid = True
+    else:
+        try:
+            validate_gradual_selection(
+                selected_indices_by_layer,
+                num_layers=len(reuse_past_key_values),
+                seq_len=seq_len,
+            )
+            gradual_selected_sets_valid = True
+        except ValueError:
+            gradual_selected_sets_valid = False
+
+    layer0_selected_oracle_close = selected_oracle_close.get(0, False)
+    layer0_selected_oracle_not_worse = selected_oracle_not_worse.get(0, False)
+    hard_invariants = {
+        "shape_matches_all_layers": all(shape_matches.values()),
+        "unselected_kv_unchanged_all_layers": all(unselected_unchanged.values()),
+        "patch_scope_valid_all_layers": all(patch_scope_valid.values()),
+        "gradual_selected_sets_valid": gradual_selected_sets_valid,
+        "layer0_selected_kv_close_to_full": layer0_selected_oracle_close,
+        "layer0_selected_kv_not_worse_than_reuse": layer0_selected_oracle_not_worse,
+    }
+    hard_invariants["all_passed"] = all(hard_invariants.values())
 
     return {
+        "repair_diagnostics_mode": "oracle_full_reference",
+        "repair_diagnostics_tolerance": tolerance,
         "selected_kv_max_diff_before_by_layer": selected_before,
         "selected_kv_max_diff_after_by_layer": selected_after,
+        "selected_kv_max_diff_after_vs_reuse_by_layer": selected_after_vs_reuse,
+        "selected_kv_oracle_close_by_layer": selected_oracle_close,
+        "selected_kv_oracle_not_worse_by_layer": selected_oracle_not_worse,
         "unselected_kv_max_diff_after_vs_reuse_by_layer": unselected_after_vs_reuse,
+        "unselected_kv_unchanged_by_layer": unselected_unchanged,
         "repaired_kv_shape_matches_reuse_by_layer": shape_matches,
+        "repair_patch_scope_valid_by_layer": patch_scope_valid,
+        "repair_hard_invariants": hard_invariants,
     }
 
 

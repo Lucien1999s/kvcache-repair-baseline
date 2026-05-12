@@ -218,6 +218,8 @@ def main() -> None:
         repair_metadata["rope_position_correction_applied"]
         == naive_result.rope_position_correction_applied
     )
+    assert repair_metadata["repair_diagnostics_mode"] == "oracle_full_reference"
+    assert repair_metadata["repair_hard_invariants"]["all_passed"] is True
     assert repair_metadata["execution_latency_seconds"] >= 0
     assert repair_metadata["planning_included_in_total_latency"] is True
     assert repair_metadata["layer_selected_counts"], "repair must report selected counts by layer."
@@ -235,6 +237,9 @@ def main() -> None:
     assert all(repair_metadata["repaired_kv_shape_matches_reuse_by_layer"].values()), (
         "repaired KV shapes must match reused KV shapes."
     )
+    assert all(repair_metadata["repair_patch_scope_valid_by_layer"].values()), (
+        "repair must only modify each layer's selected token scope."
+    )
     for layer_index, unselected_diff in repair_metadata[
         "unselected_kv_max_diff_after_vs_reuse_by_layer"
     ].items():
@@ -243,6 +248,9 @@ def main() -> None:
         )
     layer0_selected_after = repair_metadata["selected_kv_max_diff_after_by_layer"][0]
     layer0_selected_before = repair_metadata["selected_kv_max_diff_before_by_layer"][0]
+    assert repair_metadata["selected_kv_oracle_close_by_layer"][0] is True, (
+        "Layer 0 selected K/V repair should be close to full recompute."
+    )
     assert layer0_selected_after <= layer0_selected_before + 1e-5, (
         "Layer 0 selected K/V repair should not increase deviation because layer-0 "
         "selected hidden states come directly from the embedding path; "
