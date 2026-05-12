@@ -21,10 +21,12 @@ from contextflow.evaluation import (
     aggregate_qa_metrics,
     compute_normalized_score,
     evaluate_qa_prediction,
+    parse_cacheblend_generation,
 )
 from contextflow.methods.cacheblend_repair import run_cacheblend_style_repair_generation
 from contextflow.methods.full_recompute import run_token_aligned_full_recompute_greedy_generation
 from contextflow.methods.naive_reuse import run_naive_reuse_generation
+from contextflow.profiling import timed_call as profiling_timed_call
 from contextflow.runtime import load_hf_causal_lm
 
 
@@ -37,6 +39,12 @@ DEFAULT_METHODS = [
     METHOD_CACHEBLEND_REPAIR,
 ]
 SUPPORTED_METHODS = set(DEFAULT_METHODS)
+PREDICTION_PARSER_NONE = "none"
+PREDICTION_PARSER_CACHEBLEND_QA = "cacheblend_qa"
+SUPPORTED_PREDICTION_PARSERS = {
+    PREDICTION_PARSER_NONE,
+    PREDICTION_PARSER_CACHEBLEND_QA,
+}
 
 
 def parse_args() -> argparse.Namespace:
@@ -57,6 +65,12 @@ def parse_args() -> argparse.Namespace:
         default=PROMPT_POLICY_CACHEBLEND_QA,
         help="Prompt protocol used when formatting CacheBlend-style QA inputs.",
     )
+    parser.add_argument(
+        "--prediction-parser",
+        choices=sorted(SUPPORTED_PREDICTION_PARSERS),
+        default=PREDICTION_PARSER_CACHEBLEND_QA,
+        help="Post-processing parser applied before EM/F1 evaluation.",
+    )
     parser.add_argument("--output-jsonl", required=True, help="Path for per-example JSONL results.")
     parser.add_argument("--torch-dtype", default="auto", help="torch_dtype passed to model load.")
     parser.add_argument("--device-map", default="auto", help="device_map passed to model load.")
@@ -69,6 +83,12 @@ def parse_args() -> argparse.Namespace:
         "--continue-on-error",
         action="store_true",
         help="Write an error record and continue when an example fails.",
+    )
+    parser.add_argument(
+        "--enable-profiling",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Record synchronized latency and peak GPU memory when available.",
     )
     return parser.parse_args()
 
@@ -91,22 +111,53 @@ def normalize_optional_device_map(raw_device_map: str | None) -> str | None:
     return raw_device_map
 
 
-def timed_call(fn: Callable[[], dict[str, Any]]) -> dict[str, Any]:
+def run_timed_call(
+    fn: Callable[[], dict[str, Any]],
+    *,
+    enable_profiling: bool,
+) -> dict[str, Any]:
+    if enable_profiling:
+        result, profile_record = profiling_timed_call(
+            fn,
+            synchronize_cuda=True,
+            collect_peak_memory=True,
+        )
+        result.update(profile_record)
+        return result
+
     start = time.perf_counter()
     result = fn()
     result["latency_seconds"] = time.perf_counter() - start
     return result
 
 
+def parse_prediction_for_evaluation(raw_generated_text: str, prediction_parser: str) -> str:
+    if prediction_parser == PREDICTION_PARSER_NONE:
+        return raw_generated_text
+    if prediction_parser == PREDICTION_PARSER_CACHEBLEND_QA:
+        return parse_cacheblend_generation(raw_generated_text)
+    raise ValueError(
+        f"Unsupported prediction_parser={prediction_parser!r}. Supported parsers: "
+        f"{sorted(SUPPORTED_PREDICTION_PARSERS)}."
+    )
+
+
 def evaluate_method_output(
     generated_ids: list[int],
     generated_text: str,
     answers: list[str],
+    prediction_parser: str,
 ) -> dict[str, Any]:
-    metrics = evaluate_qa_prediction(generated_text, answers)
+    evaluated_prediction = parse_prediction_for_evaluation(
+        generated_text,
+        prediction_parser=prediction_parser,
+    )
+    metrics = evaluate_qa_prediction(evaluated_prediction, answers)
     return {
         "generated_ids": generated_ids,
+        "raw_generated_text": generated_text,
         "generated_text": generated_text,
+        "evaluated_prediction": evaluated_prediction,
         "exact_match": metrics["exact_match"],
         "f1": metrics["f1"],
     }
@@ -118,6 +169,7 @@ def run_full_recompute(
     tokenizer: Any,
     answers: list[str],
     max_new_tokens: int,
+    prediction_parser: str,
 ) -> dict[str, Any]:
     result = run_token_aligned_full_recompute_greedy_generation(
         tokenized_example,
@@ -129,6 +181,7 @@ def run_full_recompute(
         generated_ids=result.generation.generated_ids,
         generated_text=result.generation.output_text,
         answers=answers,
+        prediction_parser=prediction_parser,
     )
 
 
@@ -138,6 +191,7 @@ def run_naive_reuse(
     tokenizer: Any,
     answers: list[str],
     max_new_tokens: int,
+    prediction_parser: str,
 ) -> dict[str, Any]:
     result = run_naive_reuse_generation(
         tokenized_example,
@@ -149,6 +203,7 @@ def run_naive_reuse(
         generated_ids=result.generation.generated_ids,
         generated_text=result.generation.output_text,
         answers=answers,
+        prediction_parser=prediction_parser,
     )
 
 
@@ -161,6 +216,7 @@ def run_cacheblend_repair(
     initial_top_k: int,
     top_k: int,
     model_family: str,
+    prediction_parser: str,
 ) -> dict[str, Any]:
     result = run_cacheblend_style_repair_generation(
         model=model,
@@ -175,6 +231,7 @@ def run_cacheblend_repair(
         generated_ids=result.generated_ids,
         generated_text=result.output_text,
         answers=answers,
+        prediction_parser=prediction_parser,
     )
     metadata = result.metadata
     method_record.update(
@@ -197,6 +254,7 @@ def build_example_record(
     model_family: str,
     max_new_tokens: int,
     prompt_policy: str,
+    prediction_parser: str,
 ) -> dict[str, Any]:
     return {
         "example_index": example_index,
@@ -209,6 +267,7 @@ def build_example_record(
         "model_family": model_family,
         "max_new_tokens": max_new_tokens,
         "prompt_policy": prompt_policy,
+        "prediction_parser": prediction_parser,
         "methods": {},
     }
 
@@ -223,30 +282,36 @@ def run_methods_for_example(
     initial_top_k: int,
     top_k: int,
     model_family: str,
+    prediction_parser: str,
+    enable_profiling: bool,
 ) -> dict[str, dict[str, Any]]:
     method_records: dict[str, dict[str, Any]] = {}
     if METHOD_FULL_RECOMPUTE in methods:
-        method_records[METHOD_FULL_RECOMPUTE] = timed_call(
+        method_records[METHOD_FULL_RECOMPUTE] = run_timed_call(
             lambda: run_full_recompute(
                 tokenized_example,
                 model=model,
                 tokenizer=tokenizer,
                 answers=answers,
                 max_new_tokens=max_new_tokens,
-            )
+                prediction_parser=prediction_parser,
+            ),
+            enable_profiling=enable_profiling,
         )
     if METHOD_NAIVE_REUSE in methods:
-        method_records[METHOD_NAIVE_REUSE] = timed_call(
+        method_records[METHOD_NAIVE_REUSE] = run_timed_call(
             lambda: run_naive_reuse(
                 tokenized_example,
                 model=model,
                 tokenizer=tokenizer,
                 answers=answers,
                 max_new_tokens=max_new_tokens,
-            )
+                prediction_parser=prediction_parser,
+            ),
+            enable_profiling=enable_profiling,
         )
     if METHOD_CACHEBLEND_REPAIR in methods:
-        method_records[METHOD_CACHEBLEND_REPAIR] = timed_call(
+        method_records[METHOD_CACHEBLEND_REPAIR] = run_timed_call(
             lambda: run_cacheblend_repair(
                 tokenized_example,
                 model=model,
@@ -256,7 +321,9 @@ def run_methods_for_example(
                 initial_top_k=initial_top_k,
                 top_k=top_k,
                 model_family=model_family,
-            )
+                prediction_parser=prediction_parser,
+            ),
+            enable_profiling=enable_profiling,
         )
     return method_records
 
@@ -272,6 +339,7 @@ def summarize_results(
     model_name: str,
     model_family: str,
     prompt_policy: str,
+    prediction_parser: str,
     metrics_by_method: dict[str, list[dict[str, float]]],
 ) -> dict[str, Any]:
     method_summaries = {
@@ -296,6 +364,7 @@ def summarize_results(
         "model": model_name,
         "model_family": model_family,
         "prompt_policy": prompt_policy,
+        "prediction_parser": prediction_parser,
         "count": max((summary["count"] for summary in method_summaries.values()), default=0),
         "methods": method_summaries,
         "cacheblend_normalized_f1": normalized_f1,
@@ -335,11 +404,13 @@ def main() -> None:
                 model_family=args.model_family,
                 max_new_tokens=args.max_new_tokens,
                 prompt_policy=args.prompt_policy,
+                prediction_parser=args.prediction_parser,
             )
             try:
                 prompt = build_cacheblend_prompt(
                     example,
                     prompt_policy=args.prompt_policy,
+                    dataset=dataset_key,
                 )
                 tokenized = tokenize_prompt_example(prompt, bundle.tokenizer)
                 with torch.inference_mode():
@@ -353,6 +424,8 @@ def main() -> None:
                         initial_top_k=args.initial_top_k,
                         top_k=args.top_k,
                         model_family=args.model_family,
+                        prediction_parser=args.prediction_parser,
+                        enable_profiling=args.enable_profiling,
                     )
                 record["methods"] = method_records
                 for method, method_record in method_records.items():
@@ -379,6 +452,7 @@ def main() -> None:
         model_name=args.model,
         model_family=args.model_family,
         prompt_policy=args.prompt_policy,
+        prediction_parser=args.prediction_parser,
         metrics_by_method=metrics_by_method,
     )
     print(json.dumps(summary, indent=2, ensure_ascii=False))

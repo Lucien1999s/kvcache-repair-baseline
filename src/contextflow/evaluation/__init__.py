@@ -9,6 +9,7 @@ from contextflow.evaluation.qa_metrics import (
     normalize_answer,
     tokenize_normalized_answer,
 )
+from contextflow.evaluation.qa_prediction import parse_cacheblend_generation
 
 __all__ = [
     "aggregate_qa_metrics",
@@ -19,5 +20,6 @@ __all__ = [
     "exact_match_score",
     "f1_score",
     "normalize_answer",
+    "parse_cacheblend_generation",
     "tokenize_normalized_answer",
 ]
