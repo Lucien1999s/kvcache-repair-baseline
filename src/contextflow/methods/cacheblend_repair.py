@@ -64,6 +64,13 @@ class CacheBlendRepairResult:
 
 
 @dataclass(slots=True)
+class CacheBlendPartialRepairResult:
+    final_selected_hidden_states: Any
+    repaired_past_key_values: Any
+    metadata: dict[str, Any]
+
+
+@dataclass(slots=True)
 class CacheBlendRepairPlanningArtifacts:
     plan: CacheBlendRepairPlan
     full_doc_kv: tuple[tuple[Any, Any], ...]
@@ -424,6 +431,27 @@ def prepare_cacheblend_repair_plan(
     ).plan
 
 
+def prepare_cacheblend_repair_plan_with_artifacts(
+    model: Any,
+    tokenized_example: TokenizedExample,
+    initial_top_k: int = 10,
+    top_k: int = 5,
+) -> CacheBlendRepairPlanningArtifacts:
+    """Prepare an oracle-HKVD repair plan plus reusable planning artifacts.
+
+    Dataset-level diagnostics use this to measure planning as one phase and then
+    reuse the assembled document KV during clean repair execution without
+    recomputing it.
+    """
+
+    return _prepare_cacheblend_repair_plan_and_artifacts(
+        model=model,
+        tokenized_example=tokenized_example,
+        initial_top_k=initial_top_k,
+        top_k=top_k,
+    )
+
+
 def compute_model_family_selected_initial_hidden_states(
     model: Any,
     model_family: str,
@@ -550,27 +578,21 @@ def run_model_family_partial_repair(
     )
 
 
-def run_cacheblend_style_repair_generation_from_plan(
+def run_cacheblend_style_partial_repair_from_plan(
     model: Any,
-    tokenizer: Any,
     tokenized_example: TokenizedExample,
     repair_plan: CacheBlendRepairPlan,
-    max_new_tokens: int = 16,
     model_family: str = "gpt2",
     reuse_past_key_values: Any | None = None,
-) -> CacheBlendRepairResult:
-    """Execute CacheBlend-style repair from a precomputed repair plan.
+) -> CacheBlendPartialRepairResult:
+    """Execute selected-token partial KV repair from a precomputed repair plan.
 
-    This execution path does not compute or inspect full-recompute reference KV.
-    If reuse_past_key_values is provided, repair/decode measurement can exclude both
-    oracle planning and reusable document-KV construction.
+    This path does not compute or inspect full-recompute reference KV, and it does
+    not decode. Dataset runners can therefore measure repair and decode phases
+    separately.
     """
 
-    if max_new_tokens <= 0:
-        raise ValueError("max_new_tokens must be positive.")
-
     model_family = model_family.lower()
-    total_start = time.perf_counter()
     doc_input_ids = assemble_doc_input_ids(tokenized_example)
     validate_repair_plan_for_doc_input(repair_plan, doc_input_ids)
 
@@ -599,7 +621,7 @@ def run_cacheblend_style_repair_generation_from_plan(
         dtype=torch.long,
         device=selected_hidden_states.device,
     )
-    _, repaired_doc_kv = run_model_family_partial_repair(
+    final_selected_hidden_states, repaired_doc_kv = run_model_family_partial_repair(
         model=model,
         model_family=model_family,
         selected_hidden_states=selected_hidden_states,
@@ -610,37 +632,80 @@ def run_cacheblend_style_repair_generation_from_plan(
     )
     repair_latency_seconds = time.perf_counter() - repair_start
 
-    decode_start = time.perf_counter()
-    generation = generate_with_past_key_values(
-        model=model,
-        tokenizer=tokenizer,
-        q_ids=tokenized_example.q_ids,
-        past_key_values=repaired_doc_kv,
-        max_new_tokens=max_new_tokens,
-    )
-    decode_latency_seconds = time.perf_counter() - decode_start
-    execution_latency_seconds = repair_latency_seconds + decode_latency_seconds
-    total_latency_seconds = time.perf_counter() - total_start
-
     metadata = {
         "model_family": model_family,
-        "execution_mode": "from_plan",
+        "execution_mode": "partial_repair_from_plan",
         "execution_uses_full_recompute_reference": False,
         "planning_included_in_total_latency": False,
         "selected_initial_hidden_source": "model_embedding_path",
         "reuse_past_key_values_source": reuse_past_key_values_source,
         "reuse_precompute_latency_seconds": reuse_precompute_latency_seconds,
         "repair_latency_seconds": repair_latency_seconds,
-        "decode_latency_seconds": decode_latency_seconds,
-        "execution_latency_seconds": execution_latency_seconds,
-        "total_latency_seconds": total_latency_seconds,
     }
     metadata.update(repair_plan.to_metadata())
+    return CacheBlendPartialRepairResult(
+        final_selected_hidden_states=final_selected_hidden_states,
+        repaired_past_key_values=repaired_doc_kv,
+        metadata=metadata,
+    )
+
+
+def run_cacheblend_style_repair_generation_from_plan(
+    model: Any,
+    tokenizer: Any,
+    tokenized_example: TokenizedExample,
+    repair_plan: CacheBlendRepairPlan,
+    max_new_tokens: int = 16,
+    model_family: str = "gpt2",
+    reuse_past_key_values: Any | None = None,
+) -> CacheBlendRepairResult:
+    """Execute CacheBlend-style repair and decode from a precomputed repair plan.
+
+    This execution path does not compute or inspect full-recompute reference KV.
+    If reuse_past_key_values is provided, repair/decode measurement can exclude both
+    oracle planning and reusable document-KV construction.
+    """
+
+    if max_new_tokens <= 0:
+        raise ValueError("max_new_tokens must be positive.")
+
+    total_start = time.perf_counter()
+    partial_repair = run_cacheblend_style_partial_repair_from_plan(
+        model=model,
+        tokenized_example=tokenized_example,
+        repair_plan=repair_plan,
+        model_family=model_family,
+        reuse_past_key_values=reuse_past_key_values,
+    )
+
+    decode_start = time.perf_counter()
+    generation = generate_with_past_key_values(
+        model=model,
+        tokenizer=tokenizer,
+        q_ids=tokenized_example.q_ids,
+        past_key_values=partial_repair.repaired_past_key_values,
+        max_new_tokens=max_new_tokens,
+    )
+    decode_latency_seconds = time.perf_counter() - decode_start
+    repair_latency_seconds = float(partial_repair.metadata["repair_latency_seconds"])
+    execution_latency_seconds = repair_latency_seconds + decode_latency_seconds
+    total_latency_seconds = time.perf_counter() - total_start
+
+    metadata = dict(partial_repair.metadata)
+    metadata.update(
+        {
+            "execution_mode": "from_plan",
+            "repair_latency_seconds": repair_latency_seconds,
+            "decode_latency_seconds": decode_latency_seconds,
+            "execution_latency_seconds": execution_latency_seconds,
+            "total_latency_seconds": total_latency_seconds,
+        }
+    )
     return CacheBlendRepairResult(
         generated_ids=generation.generated_ids,
         output_text=generation.output_text,
         generation=generation,
-        repaired_past_key_values=repaired_doc_kv,
+        repaired_past_key_values=partial_repair.repaired_past_key_values,
         metadata=metadata,
     )
 

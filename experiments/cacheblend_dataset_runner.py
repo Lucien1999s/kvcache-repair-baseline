@@ -26,12 +26,12 @@ from contextflow.evaluation import (
 from contextflow.kv_cache import assemble_chunk_kvs, precompute_doc_chunk_kvs
 from contextflow.methods.cacheblend_repair import (
     CacheBlendRepairPlan,
-    prepare_cacheblend_repair_plan,
-    run_cacheblend_style_repair_generation_from_plan,
+    prepare_cacheblend_repair_plan_with_artifacts,
+    run_cacheblend_style_partial_repair_from_plan,
 )
 from contextflow.methods.full_recompute import run_token_aligned_full_recompute_greedy_generation
-from contextflow.methods.naive_reuse import run_naive_reuse_generation
 from contextflow.profiling import timed_call as profiling_timed_call
+from contextflow.runtime.hf_cached_generation import generate_with_past_key_values
 from contextflow.runtime import load_hf_causal_lm
 
 
@@ -116,24 +116,70 @@ def normalize_optional_device_map(raw_device_map: str | None) -> str | None:
     return raw_device_map
 
 
-def run_timed_call(
-    fn: Callable[[], dict[str, Any]],
+def run_profiled_phase(
+    fn: Callable[[], Any],
     *,
     enable_profiling: bool,
-) -> dict[str, Any]:
+) -> tuple[Any, dict[str, Any]]:
     if enable_profiling:
         result, profile_record = profiling_timed_call(
             fn,
             synchronize_cuda=True,
             collect_peak_memory=True,
         )
-        result.update(profile_record)
-        return result
+        return result, dict(profile_record)
 
     start = time.perf_counter()
     result = fn()
-    result["latency_seconds"] = time.perf_counter() - start
-    return result
+    return result, {"latency_seconds": time.perf_counter() - start}
+
+
+def phase_latency_seconds(profile_record: dict[str, Any]) -> float:
+    return float(profile_record.get("latency_seconds", 0.0))
+
+
+def max_phase_peak_memory_mb(phase_metrics: dict[str, dict[str, Any]]) -> float | None:
+    peaks = [
+        float(phase_record["peak_gpu_memory_mb"])
+        for phase_record in phase_metrics.values()
+        if phase_record.get("peak_gpu_memory_mb") is not None
+    ]
+    if not peaks:
+        return None
+    return max(peaks)
+
+
+def mean_optional_float(records: list[dict[str, Any]], key: str) -> float | None:
+    values = [
+        float(record[key])
+        for record in records
+        if record.get(key) is not None
+    ]
+    if not values:
+        return None
+    return sum(values) / len(values)
+
+
+def aggregate_resource_metrics(records: list[dict[str, Any]]) -> dict[str, Any]:
+    return {
+        "mean_latency_seconds": mean_optional_float(records, "latency_seconds"),
+        "mean_total_latency_seconds": mean_optional_float(records, "total_latency_seconds"),
+        "mean_peak_gpu_memory_mb": mean_optional_float(records, "peak_gpu_memory_mb"),
+        "mean_planning_latency_seconds": mean_optional_float(
+            records,
+            "planning_latency_seconds",
+        ),
+        "mean_reuse_precompute_latency_seconds": mean_optional_float(
+            records,
+            "reuse_precompute_latency_seconds",
+        ),
+        "mean_repair_latency_seconds": mean_optional_float(records, "repair_latency_seconds"),
+        "mean_decode_latency_seconds": mean_optional_float(records, "decode_latency_seconds"),
+        "mean_execution_latency_seconds": mean_optional_float(
+            records,
+            "execution_latency_seconds",
+        ),
+    }
 
 
 def parse_prediction_for_evaluation(raw_generated_text: str, prediction_parser: str) -> str:
@@ -193,76 +239,98 @@ def run_full_recompute(
 def run_naive_reuse(
     tokenized_example: Any,
     model: Any,
+    past_key_values: Any,
     tokenizer: Any,
     answers: list[str],
     max_new_tokens: int,
     prediction_parser: str,
 ) -> dict[str, Any]:
-    result = run_naive_reuse_generation(
-        tokenized_example,
+    generation = generate_with_past_key_values(
         model=model,
         tokenizer=tokenizer,
+        q_ids=tokenized_example.q_ids,
+        past_key_values=past_key_values,
         max_new_tokens=max_new_tokens,
     )
     return evaluate_method_output(
-        generated_ids=result.generation.generated_ids,
-        generated_text=result.generation.output_text,
+        generated_ids=generation.generated_ids,
+        generated_text=generation.output_text,
         answers=answers,
         prediction_parser=prediction_parser,
     )
 
 
-def run_cacheblend_repair(
-    tokenized_example: Any,
+def decode_with_past_key_values(
     model: Any,
     tokenizer: Any,
-    answers: list[str],
-    repair_plan: CacheBlendRepairPlan,
-    reuse_past_key_values: Any,
-    reuse_precompute_latency_seconds: float,
+    tokenized_example: Any,
+    past_key_values: Any,
     max_new_tokens: int,
-    model_family: str,
-    prediction_parser: str,
-) -> dict[str, Any]:
-    result = run_cacheblend_style_repair_generation_from_plan(
+) -> Any:
+    return generate_with_past_key_values(
         model=model,
         tokenizer=tokenizer,
-        tokenized_example=tokenized_example,
-        repair_plan=repair_plan,
+        q_ids=tokenized_example.q_ids,
+        past_key_values=past_key_values,
         max_new_tokens=max_new_tokens,
-        model_family=model_family,
-        reuse_past_key_values=reuse_past_key_values,
     )
+
+
+def build_cacheblend_repair_record(
+    generation: Any,
+    answers: list[str],
+    prediction_parser: str,
+    repair_plan: CacheBlendRepairPlan,
+    partial_repair_metadata: dict[str, Any],
+    phase_metrics: dict[str, dict[str, Any]],
+) -> dict[str, Any]:
     method_record = evaluate_method_output(
-        generated_ids=result.generated_ids,
-        generated_text=result.output_text,
+        generated_ids=generation.generated_ids,
+        generated_text=generation.output_text,
         answers=answers,
         prediction_parser=prediction_parser,
     )
-    metadata = result.metadata
-    repair_plan_metadata = metadata.get("repair_plan_metadata", {})
+    repair_plan_metadata = repair_plan.metadata
+    planning_latency_seconds = phase_latency_seconds(phase_metrics["plan"])
+    reuse_precompute_latency_seconds = (
+        phase_latency_seconds(phase_metrics["reuse_precompute"])
+        if "reuse_precompute" in phase_metrics
+        else None
+    )
+    repair_latency_seconds = phase_latency_seconds(phase_metrics["repair"])
+    decode_latency_seconds = phase_latency_seconds(phase_metrics["decode"])
+    execution_latency_seconds = repair_latency_seconds + decode_latency_seconds
+    total_latency_seconds = sum(
+        phase_latency_seconds(phase_record)
+        for phase_record in phase_metrics.values()
+    )
+    peak_gpu_memory_mb = max_phase_peak_memory_mb(phase_metrics)
     method_record.update(
         {
-            "repair_plan_strategy": metadata.get("repair_plan_strategy"),
-            "planning_latency_seconds": repair_plan_metadata.get("planning_latency_seconds"),
+            "repair_plan_strategy": repair_plan.strategy,
+            "planning_latency_seconds": planning_latency_seconds,
             "uses_full_recompute_reference": repair_plan_metadata.get(
                 "uses_full_recompute_reference"
             ),
-            "execution_mode": metadata.get("execution_mode"),
-            "execution_uses_full_recompute_reference": metadata.get(
+            "execution_mode": "from_plan",
+            "execution_uses_full_recompute_reference": partial_repair_metadata.get(
                 "execution_uses_full_recompute_reference"
             ),
-            "planning_included_in_total_latency": metadata.get(
-                "planning_included_in_total_latency"
-            ),
-            "execution_latency_seconds": metadata.get("execution_latency_seconds"),
+            "planning_included_in_total_latency": True,
+            "execution_latency_seconds": execution_latency_seconds,
             "reuse_precompute_latency_seconds": reuse_precompute_latency_seconds,
-            "reuse_past_key_values_source": metadata.get("reuse_past_key_values_source"),
-            "repair_latency_seconds": metadata.get("repair_latency_seconds"),
-            "decode_latency_seconds": metadata.get("decode_latency_seconds"),
-            "runtime_selected_count": len(metadata.get("runtime_selected_indices", [])),
-            "runtime_selection_mode": metadata.get("runtime_selection_mode"),
-            "layer_selected_counts": metadata.get("layer_selected_counts", []),
+            "repair_latency_seconds": repair_latency_seconds,
+            "decode_latency_seconds": decode_latency_seconds,
+            "total_latency_seconds": total_latency_seconds,
+            "latency_seconds": total_latency_seconds,
+            "peak_gpu_memory_mb": peak_gpu_memory_mb,
+            "phase_metrics": phase_metrics,
+            "reuse_past_key_values_source": partial_repair_metadata.get(
+                "reuse_past_key_values_source"
+            ),
+            "runtime_selected_count": len(repair_plan.runtime_selected_indices),
+            "runtime_selection_mode": repair_plan.runtime_selection_mode,
+            "layer_selected_counts": list(repair_plan.layer_selected_counts),
         }
     )
     return method_record
@@ -294,10 +362,9 @@ def build_example_record(
     }
 
 
-def precompute_reuse_doc_kv(model: Any, tokenized_example: Any) -> tuple[Any, float]:
-    start = time.perf_counter()
+def precompute_reuse_doc_kv(model: Any, tokenized_example: Any) -> Any:
     chunk_kvs = precompute_doc_chunk_kvs(model, tokenized_example)
-    return assemble_chunk_kvs(chunk_kvs), time.perf_counter() - start
+    return assemble_chunk_kvs(chunk_kvs)
 
 
 def run_methods_for_example(
@@ -315,7 +382,7 @@ def run_methods_for_example(
 ) -> dict[str, dict[str, Any]]:
     method_records: dict[str, dict[str, Any]] = {}
     if METHOD_FULL_RECOMPUTE in methods:
-        method_records[METHOD_FULL_RECOMPUTE] = run_timed_call(
+        full_record, full_profile = run_profiled_phase(
             lambda: run_full_recompute(
                 tokenized_example,
                 model=model,
@@ -326,11 +393,27 @@ def run_methods_for_example(
             ),
             enable_profiling=enable_profiling,
         )
+        full_record["phase_metrics"] = {"generation": full_profile}
+        full_record["latency_seconds"] = phase_latency_seconds(full_profile)
+        full_record["total_latency_seconds"] = phase_latency_seconds(full_profile)
+        full_record["peak_gpu_memory_mb"] = max_phase_peak_memory_mb(
+            full_record["phase_metrics"]
+        )
+        method_records[METHOD_FULL_RECOMPUTE] = full_record
+
     if METHOD_NAIVE_REUSE in methods:
-        method_records[METHOD_NAIVE_REUSE] = run_timed_call(
+        naive_reuse_kv, naive_reuse_profile = run_profiled_phase(
+            lambda: precompute_reuse_doc_kv(
+                model=model,
+                tokenized_example=tokenized_example,
+            ),
+            enable_profiling=enable_profiling,
+        )
+        naive_record, naive_decode_profile = run_profiled_phase(
             lambda: run_naive_reuse(
                 tokenized_example,
                 model=model,
+                past_key_values=naive_reuse_kv,
                 tokenizer=tokenizer,
                 answers=answers,
                 max_new_tokens=max_new_tokens,
@@ -338,31 +421,71 @@ def run_methods_for_example(
             ),
             enable_profiling=enable_profiling,
         )
+        naive_phase_metrics = {
+            "reuse_precompute": naive_reuse_profile,
+            "decode": naive_decode_profile,
+        }
+        naive_reuse_latency_seconds = phase_latency_seconds(naive_reuse_profile)
+        naive_decode_latency_seconds = phase_latency_seconds(naive_decode_profile)
+        naive_total_latency_seconds = naive_reuse_latency_seconds + naive_decode_latency_seconds
+        naive_record.update(
+            {
+                "phase_metrics": naive_phase_metrics,
+                "reuse_precompute_latency_seconds": naive_reuse_latency_seconds,
+                "decode_latency_seconds": naive_decode_latency_seconds,
+                "total_latency_seconds": naive_total_latency_seconds,
+                "latency_seconds": naive_total_latency_seconds,
+                "peak_gpu_memory_mb": max_phase_peak_memory_mb(naive_phase_metrics),
+                "assembled_kv_layers": len(naive_reuse_kv),
+            }
+        )
+        method_records[METHOD_NAIVE_REUSE] = naive_record
+
     if METHOD_CACHEBLEND_REPAIR in methods:
-        repair_plan = prepare_cacheblend_repair_plan(
-            model=model,
-            tokenized_example=tokenized_example,
-            initial_top_k=initial_top_k,
-            top_k=top_k,
+        planning_artifacts, plan_profile = run_profiled_phase(
+            lambda: prepare_cacheblend_repair_plan_with_artifacts(
+                model=model,
+                tokenized_example=tokenized_example,
+                initial_top_k=initial_top_k,
+                top_k=top_k,
+            ),
+            enable_profiling=enable_profiling,
         )
-        reuse_past_key_values, reuse_precompute_latency_seconds = precompute_reuse_doc_kv(
-            model=model,
-            tokenized_example=tokenized_example,
+        repair_plan = planning_artifacts.plan
+        repair_reuse_kv = planning_artifacts.reuse_doc_kv
+        del planning_artifacts
+        partial_repair, repair_profile = run_profiled_phase(
+            lambda: run_cacheblend_style_partial_repair_from_plan(
+                model=model,
+                tokenized_example=tokenized_example,
+                repair_plan=repair_plan,
+                model_family=model_family,
+                reuse_past_key_values=repair_reuse_kv,
+            ),
+            enable_profiling=enable_profiling,
         )
-        method_records[METHOD_CACHEBLEND_REPAIR] = run_timed_call(
-            lambda: run_cacheblend_repair(
-                tokenized_example,
+        repair_generation, repair_decode_profile = run_profiled_phase(
+            lambda: decode_with_past_key_values(
                 model=model,
                 tokenizer=tokenizer,
-                answers=answers,
-                repair_plan=repair_plan,
-                reuse_past_key_values=reuse_past_key_values,
-                reuse_precompute_latency_seconds=reuse_precompute_latency_seconds,
+                tokenized_example=tokenized_example,
+                past_key_values=partial_repair.repaired_past_key_values,
                 max_new_tokens=max_new_tokens,
-                model_family=model_family,
-                prediction_parser=prediction_parser,
             ),
             enable_profiling=enable_profiling,
+        )
+        repair_phase_metrics = {
+            "plan": plan_profile,
+            "repair": repair_profile,
+            "decode": repair_decode_profile,
+        }
+        method_records[METHOD_CACHEBLEND_REPAIR] = build_cacheblend_repair_record(
+            generation=repair_generation,
+            answers=answers,
+            prediction_parser=prediction_parser,
+            repair_plan=repair_plan,
+            partial_repair_metadata=partial_repair.metadata,
+            phase_metrics=repair_phase_metrics,
         )
     return method_records
 
@@ -380,11 +503,16 @@ def summarize_results(
     prompt_policy: str,
     prediction_parser: str,
     metrics_by_method: dict[str, list[dict[str, float]]],
+    resources_by_method: dict[str, list[dict[str, Any]]],
 ) -> dict[str, Any]:
     method_summaries = {
         method: aggregate_qa_metrics(metrics)
         for method, metrics in metrics_by_method.items()
     }
+    for method, method_summary in method_summaries.items():
+        method_summary.update(
+            aggregate_resource_metrics(resources_by_method.get(method, []))
+        )
 
     normalized_f1 = None
     if all(method in method_summaries for method in DEFAULT_METHODS):
@@ -432,6 +560,7 @@ def main() -> None:
     output_path = Path(args.output_jsonl)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     metrics_by_method: dict[str, list[dict[str, float]]] = {method: [] for method in methods}
+    resources_by_method: dict[str, list[dict[str, Any]]] = {method: [] for method in methods}
 
     with output_path.open("w", encoding="utf-8") as output_file:
         for example_index, example in enumerate(examples):
@@ -474,6 +603,7 @@ def main() -> None:
                             "f1": float(method_record["f1"]),
                         }
                     )
+                    resources_by_method[method].append(method_record)
             except Exception as error:
                 record["error"] = {
                     "type": type(error).__name__,
@@ -493,6 +623,7 @@ def main() -> None:
         prompt_policy=args.prompt_policy,
         prediction_parser=args.prediction_parser,
         metrics_by_method=metrics_by_method,
+        resources_by_method=resources_by_method,
     )
     print(json.dumps(summary, indent=2, ensure_ascii=False))
 
