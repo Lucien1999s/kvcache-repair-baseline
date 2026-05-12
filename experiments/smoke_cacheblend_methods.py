@@ -213,6 +213,17 @@ def main() -> None:
     assert repair_metadata["execution_latency_seconds"] >= 0
     assert repair_metadata["planning_included_in_total_latency"] is True
     assert repair_metadata["layer_selected_counts"], "repair must report selected counts by layer."
+    assert repair_metadata["runtime_selection_mode"] == "gradual_selected_indices_by_layer"
+    assert (
+        repair_metadata["runtime_selected_indices"]
+        == repair_metadata["selected_indices_by_layer"][0]
+    ), "runtime selection should start from layer-0 HKVD selection."
+    for layer_index in range(1, len(repair_metadata["selected_indices_by_layer"])):
+        current = set(repair_metadata["selected_indices_by_layer"][layer_index])
+        previous = set(repair_metadata["selected_indices_by_layer"][layer_index - 1])
+        assert current.issubset(previous), (
+            f"Layer {layer_index} selected tokens must be gradual subset of previous layer."
+        )
     assert all(repair_metadata["repaired_kv_shape_matches_reuse_by_layer"].values()), (
         "repaired KV shapes must match reused KV shapes."
     )

@@ -145,6 +145,10 @@ def validate_repair_plan_for_doc_input(
         num_layers=plan.num_layers,
         seq_len=plan.doc_total_len,
     )
+    if plan.runtime_selected_indices != plan.selected_indices_by_layer[0]:
+        raise ValueError(
+            "repair_plan.runtime_selected_indices must match layer 0 selected indices."
+        )
     if plan.runtime_selected_indices != sorted(plan.runtime_selected_indices):
         raise ValueError("repair_plan.runtime_selected_indices must be sorted.")
     invalid = [
@@ -191,13 +195,13 @@ def compute_repair_diagnostics(
     full_past_key_values: tuple[tuple[Any, Any], ...],
     runtime_selected_indices: list[int],
     seq_len: int,
+    selected_indices_by_layer: dict[int, list[int]] | None = None,
 ) -> dict[str, dict[int, float] | dict[int, bool]]:
     if len(reuse_past_key_values) != len(repaired_past_key_values):
         raise ValueError("reuse and repaired KV must have the same layer count.")
     if len(reuse_past_key_values) != len(full_past_key_values):
         raise ValueError("reuse and full KV must have the same layer count.")
 
-    unselected_indices = resolve_unselected_indices(seq_len, runtime_selected_indices)
     selected_before: dict[int, float] = {}
     selected_after: dict[int, float] = {}
     unselected_after_vs_reuse: dict[int, float] = {}
@@ -206,17 +210,23 @@ def compute_repair_diagnostics(
     for layer_index, (reuse_layer_kv, repaired_layer_kv, full_layer_kv) in enumerate(
         zip(reuse_past_key_values, repaired_past_key_values, full_past_key_values)
     ):
+        selected_indices = (
+            selected_indices_by_layer[layer_index]
+            if selected_indices_by_layer is not None
+            else runtime_selected_indices
+        )
+        unselected_indices = resolve_unselected_indices(seq_len, selected_indices)
         reuse_key, reuse_value = reuse_layer_kv[0], reuse_layer_kv[1]
         repaired_key, repaired_value = repaired_layer_kv[0], repaired_layer_kv[1]
         selected_before[layer_index] = layer_kv_max_diff_at_indices(
             reuse_layer_kv,
             full_layer_kv,
-            runtime_selected_indices,
+            selected_indices,
         )
         selected_after[layer_index] = layer_kv_max_diff_at_indices(
             repaired_layer_kv,
             full_layer_kv,
-            runtime_selected_indices,
+            selected_indices,
         )
         unselected_after_vs_reuse[layer_index] = layer_kv_max_diff_at_indices(
             repaired_layer_kv,
@@ -324,15 +334,15 @@ def build_cacheblend_repair_plan(
     num_layers: int,
     metadata: dict[str, Any] | None = None,
     strategy: str = "oracle_hkvd_gradual",
-    runtime_selection_mode: str = "fixed_layer0_selected_indices",
+    runtime_selection_mode: str = "gradual_selected_indices_by_layer",
 ) -> CacheBlendRepairPlan:
     validate_gradual_selection(
         selected_indices_by_layer,
         num_layers=num_layers,
         seq_len=doc_total_len,
     )
-    # Current runtime primitive uses one fixed selected index set across layers.
-    # Per-layer variable selected-index runtime repair is not implemented yet.
+    # The layer-0 set is the initial active set; gradual filtering can shrink it
+    # in later layers through selected_indices_by_layer.
     runtime_selected_indices = list(selected_indices_by_layer[0])
     return CacheBlendRepairPlan(
         selected_indices_by_layer={
@@ -518,6 +528,7 @@ def run_model_family_partial_repair(
     reuse_past_key_values: Any,
     num_layers: int,
     attention_mask: Any,
+    selected_indices_by_layer: dict[int, list[int]] | None = None,
 ) -> tuple[Any, tuple[tuple[Any, Any], ...]]:
     normalized_model_family = model_family.lower()
 
@@ -536,6 +547,7 @@ def run_model_family_partial_repair(
             start_layer_index=0,
             end_layer_index=num_layers,
             attention_mask=attention_mask,
+            selected_indices_by_layer=selected_indices_by_layer,
         )
 
     if normalized_model_family == "mistral":
@@ -553,6 +565,7 @@ def run_model_family_partial_repair(
             start_layer_index=0,
             end_layer_index=num_layers,
             attention_mask=attention_mask,
+            selected_indices_by_layer=selected_indices_by_layer,
         )
 
     if normalized_model_family == "qwen2":
@@ -570,6 +583,7 @@ def run_model_family_partial_repair(
             start_layer_index=0,
             end_layer_index=num_layers,
             attention_mask=attention_mask,
+            selected_indices_by_layer=selected_indices_by_layer,
         )
 
     raise NotImplementedError(
@@ -629,6 +643,7 @@ def run_cacheblend_style_partial_repair_from_plan(
         reuse_past_key_values=reuse_doc_kv,
         num_layers=repair_plan.num_layers,
         attention_mask=doc_attention_mask,
+        selected_indices_by_layer=repair_plan.selected_indices_by_layer,
     )
     repair_latency_seconds = time.perf_counter() - repair_start
 
@@ -756,6 +771,7 @@ def run_cacheblend_style_repair_generation(
             full_past_key_values=artifacts.full_doc_kv,
             runtime_selected_indices=plan.runtime_selected_indices,
             seq_len=plan.doc_total_len,
+            selected_indices_by_layer=plan.selected_indices_by_layer,
         )
         if include_repair_diagnostics
         else {}

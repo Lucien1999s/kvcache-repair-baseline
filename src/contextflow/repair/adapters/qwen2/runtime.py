@@ -13,6 +13,10 @@ from contextflow.repair.adapters.qwen2.adapter import (
     repeat_qwen2_kv,
     validate_selected_indices,
 )
+from contextflow.repair.adapters.selection import (
+    normalize_selected_indices_by_layer,
+    select_hidden_states_for_indices,
+)
 
 
 def _merge_heads(tensor: Any) -> Any:
@@ -263,6 +267,7 @@ def run_qwen2_partial_layers(
     end_layer_index: int | None = None,
     attention_mask: Any | None = None,
     head_mask: Any | None = None,
+    selected_indices_by_layer: dict[int, list[int]] | None = None,
 ) -> tuple[Any, tuple[tuple[Any, Any], ...]]:
     """Propagate selected Qwen2 hidden states through multiple decoder layers."""
 
@@ -283,14 +288,31 @@ def run_qwen2_partial_layers(
             f"and num_layers={num_layers}."
         )
 
+    full_seq_len = int(normalized_past_key_values[0][0].shape[-2])
+    layer_selected_indices = normalize_selected_indices_by_layer(
+        selected_indices=selected_indices,
+        selected_indices_by_layer=selected_indices_by_layer,
+        start_layer_index=start_layer_index,
+        end_layer_index=end_layer_index,
+        full_seq_len=full_seq_len,
+    )
+
     patched_past_key_values = list(normalized_past_key_values)
     current_selected_hidden_states = selected_hidden_states
+    current_selected_indices = list(selected_indices)
     for layer_index in range(start_layer_index, end_layer_index):
+        selected_for_layer = layer_selected_indices[layer_index]
+        current_selected_hidden_states = select_hidden_states_for_indices(
+            hidden_states=current_selected_hidden_states,
+            current_indices=current_selected_indices,
+            target_indices=selected_for_layer,
+        )
+        current_selected_indices = selected_for_layer
         current_selected_hidden_states, patched_layer_kv = run_qwen2_partial_layer(
             model=model,
             layer_index=layer_index,
             selected_hidden_states=current_selected_hidden_states,
-            selected_indices=selected_indices,
+            selected_indices=selected_for_layer,
             layer_kv=patched_past_key_values[layer_index],
             attention_mask=attention_mask,
             head_mask=_select_layer_head_mask(head_mask, layer_index),
