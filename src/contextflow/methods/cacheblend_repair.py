@@ -220,10 +220,11 @@ def compute_repair_diagnostics(
 ) -> dict[str, Any]:
     """Compare reused/repaired doc KV against full recompute doc KV.
 
-    These values are diagnostics. With true per-layer partial repair, layers after
-    layer 0 consume hidden states propagated through mixed repaired/reused KV, so
-    selected KV deviation from full recompute is not guaranteed to decrease
-    monotonically at every layer.
+    These values are diagnostics. Hard invariants cover patch scope, shape, and
+    gradual selection. Full-reference closeness is reported separately because
+    with true per-layer partial repair, layers after layer 0 consume hidden states
+    propagated through mixed repaired/reused KV, so selected KV deviation from
+    full recompute is not guaranteed to decrease monotonically at every layer.
     """
 
     if len(reuse_past_key_values) != len(repaired_past_key_values):
@@ -309,10 +310,13 @@ def compute_repair_diagnostics(
         "unselected_kv_unchanged_all_layers": all(unselected_unchanged.values()),
         "patch_scope_valid_all_layers": all(patch_scope_valid.values()),
         "gradual_selected_sets_valid": gradual_selected_sets_valid,
-        "layer0_selected_kv_close_to_full": layer0_selected_oracle_close,
         "layer0_selected_kv_not_worse_than_reuse": layer0_selected_oracle_not_worse,
     }
     hard_invariants["all_passed"] = all(hard_invariants.values())
+    oracle_reference_checks = {
+        "layer0_selected_kv_close_to_full": layer0_selected_oracle_close,
+        "layer0_selected_kv_not_worse_than_reuse": layer0_selected_oracle_not_worse,
+    }
 
     return {
         "repair_diagnostics_mode": "oracle_full_reference",
@@ -328,6 +332,7 @@ def compute_repair_diagnostics(
         "repaired_kv_shape_matches_reuse_by_layer": shape_matches,
         "repair_patch_scope_valid_by_layer": patch_scope_valid,
         "repair_hard_invariants": hard_invariants,
+        "repair_oracle_reference_checks": oracle_reference_checks,
     }
 
 

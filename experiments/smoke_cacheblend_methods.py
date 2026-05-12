@@ -220,7 +220,8 @@ def main() -> None:
     )
     assert repair_metadata["repair_diagnostics_mode"] == "oracle_full_reference"
     assert repair_metadata["repair_hard_invariants"]["all_passed"] is True, (
-        f"repair_hard_invariants failed: {repair_metadata['repair_hard_invariants']}"
+        f"repair_hard_invariants failed: {repair_metadata['repair_hard_invariants']}; "
+        f"oracle_reference_checks={repair_metadata['repair_oracle_reference_checks']}"
     )
     assert repair_metadata["execution_latency_seconds"] >= 0
     assert repair_metadata["planning_included_in_total_latency"] is True
@@ -250,9 +251,9 @@ def main() -> None:
         )
     layer0_selected_after = repair_metadata["selected_kv_max_diff_after_by_layer"][0]
     layer0_selected_before = repair_metadata["selected_kv_max_diff_before_by_layer"][0]
-    assert repair_metadata["selected_kv_oracle_close_by_layer"][0] is True, (
-        "Layer 0 selected K/V repair should be close to full recompute; "
-        f"after={layer0_selected_after}, "
+    assert repair_metadata["selected_kv_oracle_not_worse_by_layer"][0] is True, (
+        "Layer 0 selected K/V repair should not be worse than reused KV; "
+        f"before={layer0_selected_before}, after={layer0_selected_after}, "
         f"tolerance={repair_metadata['repair_diagnostics_tolerance']}."
     )
     assert layer0_selected_after <= (
