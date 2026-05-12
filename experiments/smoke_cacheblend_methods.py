@@ -16,7 +16,10 @@ from contextflow.evaluation import (
     evaluate_qa_prediction,
     parse_cacheblend_generation,
 )
-from contextflow.methods.cacheblend_repair import run_cacheblend_style_repair_generation
+from contextflow.methods.cacheblend_repair import (
+    run_cacheblend_style_online_repair_generation,
+    run_cacheblend_style_repair_generation,
+)
 from contextflow.methods.full_recompute import run_token_aligned_full_recompute_greedy_generation
 from contextflow.methods.naive_reuse import run_naive_reuse_generation
 from contextflow.profiling import timed_call
@@ -26,6 +29,8 @@ from contextflow.runtime import load_hf_causal_lm
 METHOD_FULL_RECOMPUTE = "full_recompute"
 METHOD_NAIVE_REUSE = "naive_reuse"
 METHOD_CACHEBLEND_REPAIR = "cacheblend_repair"
+REPAIR_PLANNER_ORACLE_HKVD = "oracle_hkvd"
+REPAIR_PLANNER_ONLINE_GRADUAL_HKVD = "online_gradual_hkvd"
 
 INLINE_SAMPLE: list[dict[str, Any]] = [
     {
@@ -64,6 +69,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-new-tokens", type=int, default=4)
     parser.add_argument("--initial-top-k", type=int, default=5)
     parser.add_argument("--top-k", type=int, default=3)
+    parser.add_argument(
+        "--repair-planner",
+        choices=[REPAIR_PLANNER_ORACLE_HKVD, REPAIR_PLANNER_ONLINE_GRADUAL_HKVD],
+        default=REPAIR_PLANNER_ONLINE_GRADUAL_HKVD,
+    )
     parser.add_argument("--torch-dtype", default="auto")
     parser.add_argument("--device-map", default=None)
     return parser.parse_args()
@@ -168,15 +178,27 @@ def main() -> None:
         )
 
         repair_result, repair_profile = timed_call(
-            lambda: run_cacheblend_style_repair_generation(
-                model=bundle.model,
-                tokenizer=bundle.tokenizer,
-                tokenized_example=tokenized,
-                max_new_tokens=args.max_new_tokens,
-                initial_top_k=args.initial_top_k,
-                top_k=args.top_k,
-                model_family=args.model_family,
-                include_repair_diagnostics=True,
+            lambda: (
+                run_cacheblend_style_repair_generation(
+                    model=bundle.model,
+                    tokenizer=bundle.tokenizer,
+                    tokenized_example=tokenized,
+                    max_new_tokens=args.max_new_tokens,
+                    initial_top_k=args.initial_top_k,
+                    top_k=args.top_k,
+                    model_family=args.model_family,
+                    include_repair_diagnostics=True,
+                )
+                if args.repair_planner == REPAIR_PLANNER_ORACLE_HKVD
+                else run_cacheblend_style_online_repair_generation(
+                    model=bundle.model,
+                    tokenizer=bundle.tokenizer,
+                    tokenized_example=tokenized,
+                    max_new_tokens=args.max_new_tokens,
+                    initial_top_k=args.initial_top_k,
+                    top_k=args.top_k,
+                    model_family=args.model_family,
+                )
             ),
             synchronize_cuda=True,
             collect_peak_memory=True,
@@ -200,6 +222,7 @@ def main() -> None:
                 "runtime_selected_count": len(repair_metadata["runtime_selected_indices"]),
                 "runtime_selection_mode": repair_metadata["runtime_selection_mode"],
                 "layer_selected_counts": repair_metadata["layer_selected_counts"],
+                "repair_plan_strategy": repair_metadata["repair_plan_strategy"],
             }
         )
 
@@ -207,26 +230,39 @@ def main() -> None:
         assert_method_record(method_name, record)
 
     assert repair_metadata["runtime_selected_indices"], "repair must select runtime token indices."
-    assert repair_metadata["repair_plan_strategy"] == "oracle_hkvd_gradual"
-    assert repair_metadata["repair_plan_metadata"]["uses_full_recompute_reference"] is True
-    assert repair_metadata["repair_plan_metadata"]["selection_algorithm"] == "gradual_hkvd"
-    assert repair_metadata["repair_plan_metadata"]["planning_latency_seconds"] >= 0
-    assert repair_metadata["execution_mode"] == "from_plan"
+    if args.repair_planner == REPAIR_PLANNER_ORACLE_HKVD:
+        assert repair_metadata["repair_plan_strategy"] == "oracle_hkvd_gradual"
+        assert repair_metadata["repair_plan_metadata"]["uses_full_recompute_reference"] is True
+        assert repair_metadata["repair_plan_metadata"]["selection_algorithm"] == "gradual_hkvd"
+        assert repair_metadata["repair_plan_metadata"]["planning_latency_seconds"] >= 0
+        assert repair_metadata["execution_mode"] == "from_plan"
+    else:
+        assert repair_metadata["repair_plan_strategy"] == "online_gradual_hkvd"
+        assert repair_metadata["repair_plan_metadata"]["uses_full_recompute_reference"] is False
+        assert (
+            repair_metadata["repair_plan_metadata"]["selection_algorithm"]
+            == "online_gradual_hkvd"
+        )
+        assert repair_metadata["execution_mode"] == "online_gradual_hkvd"
     assert repair_metadata["execution_uses_full_recompute_reference"] is False
     assert repair_metadata["selected_initial_hidden_source"] == "model_embedding_path"
     assert (
         repair_metadata["rope_position_correction_applied"]
         == naive_result.rope_position_correction_applied
     )
-    assert repair_metadata["repair_diagnostics_mode"] == "oracle_full_reference"
-    assert repair_metadata["repair_hard_invariants"]["all_passed"] is True, (
-        f"repair_hard_invariants failed: {repair_metadata['repair_hard_invariants']}; "
-        f"oracle_reference_checks={repair_metadata['repair_oracle_reference_checks']}"
-    )
+    if args.repair_planner == REPAIR_PLANNER_ORACLE_HKVD:
+        assert repair_metadata["repair_diagnostics_mode"] == "oracle_full_reference"
+        assert repair_metadata["repair_hard_invariants"]["all_passed"] is True, (
+            f"repair_hard_invariants failed: {repair_metadata['repair_hard_invariants']}; "
+            f"oracle_reference_checks={repair_metadata['repair_oracle_reference_checks']}"
+        )
     assert repair_metadata["execution_latency_seconds"] >= 0
     assert repair_metadata["planning_included_in_total_latency"] is True
     assert repair_metadata["layer_selected_counts"], "repair must report selected counts by layer."
-    assert repair_metadata["runtime_selection_mode"] == "gradual_selected_indices_by_layer"
+    assert repair_metadata["runtime_selection_mode"] in {
+        "gradual_selected_indices_by_layer",
+        "online_gradual_selected_indices_by_layer",
+    }
     assert (
         repair_metadata["runtime_selected_indices"]
         == repair_metadata["selected_indices_by_layer"][0]
@@ -237,32 +273,33 @@ def main() -> None:
         assert current.issubset(previous), (
             f"Layer {layer_index} selected tokens must be gradual subset of previous layer."
         )
-    assert all(repair_metadata["repaired_kv_shape_matches_reuse_by_layer"].values()), (
-        "repaired KV shapes must match reused KV shapes."
-    )
-    assert all(repair_metadata["repair_patch_scope_valid_by_layer"].values()), (
-        "repair must only modify each layer's selected token scope."
-    )
-    for layer_index, unselected_diff in repair_metadata[
-        "unselected_kv_max_diff_after_vs_reuse_by_layer"
-    ].items():
-        assert unselected_diff == 0.0, (
-            f"Layer {layer_index} unselected K/V should remain unchanged."
+    if args.repair_planner == REPAIR_PLANNER_ORACLE_HKVD:
+        assert all(repair_metadata["repaired_kv_shape_matches_reuse_by_layer"].values()), (
+            "repaired KV shapes must match reused KV shapes."
         )
-    layer0_selected_after = repair_metadata["selected_kv_max_diff_after_by_layer"][0]
-    layer0_selected_before = repair_metadata["selected_kv_max_diff_before_by_layer"][0]
-    assert repair_metadata["selected_kv_oracle_not_worse_by_layer"][0] is True, (
-        "Layer 0 selected K/V repair should not be worse than reused KV; "
-        f"before={layer0_selected_before}, after={layer0_selected_after}, "
-        f"tolerance={repair_metadata['repair_diagnostics_tolerance']}."
-    )
-    assert layer0_selected_after <= (
-        layer0_selected_before + repair_metadata["repair_diagnostics_tolerance"]
-    ), (
-        "Layer 0 selected K/V repair should not increase deviation because layer-0 "
-        "selected hidden states come directly from the embedding path; "
-        f"before={layer0_selected_before}, after={layer0_selected_after}."
-    )
+        assert all(repair_metadata["repair_patch_scope_valid_by_layer"].values()), (
+            "repair must only modify each layer's selected token scope."
+        )
+        for layer_index, unselected_diff in repair_metadata[
+            "unselected_kv_max_diff_after_vs_reuse_by_layer"
+        ].items():
+            assert unselected_diff == 0.0, (
+                f"Layer {layer_index} unselected K/V should remain unchanged."
+            )
+        layer0_selected_after = repair_metadata["selected_kv_max_diff_after_by_layer"][0]
+        layer0_selected_before = repair_metadata["selected_kv_max_diff_before_by_layer"][0]
+        assert repair_metadata["selected_kv_oracle_not_worse_by_layer"][0] is True, (
+            "Layer 0 selected K/V repair should not be worse than reused KV; "
+            f"before={layer0_selected_before}, after={layer0_selected_after}, "
+            f"tolerance={repair_metadata['repair_diagnostics_tolerance']}."
+        )
+        assert layer0_selected_after <= (
+            layer0_selected_before + repair_metadata["repair_diagnostics_tolerance"]
+        ), (
+            "Layer 0 selected K/V repair should not increase deviation because layer-0 "
+            "selected hidden states come directly from the embedding path; "
+            f"before={layer0_selected_before}, after={layer0_selected_after}."
+        )
 
     normalized_f1 = compute_normalized_score(
         method_score=float(method_records[METHOD_CACHEBLEND_REPAIR]["f1"]),
@@ -273,6 +310,7 @@ def main() -> None:
         "example_id": example.example_id,
         "model": args.model,
         "model_family": args.model_family,
+        "repair_planner": args.repair_planner,
         "max_new_tokens": args.max_new_tokens,
         "methods": method_records,
         "cacheblend_normalized_f1": normalized_f1,

@@ -32,6 +32,7 @@ from contextflow.kv_cache import (
 from contextflow.methods.cacheblend_repair import (
     CacheBlendRepairPlan,
     prepare_cacheblend_repair_plan_with_artifacts,
+    run_cacheblend_style_online_partial_repair,
     run_cacheblend_style_partial_repair_from_plan,
 )
 from contextflow.methods.full_recompute import run_token_aligned_full_recompute_greedy_generation
@@ -55,6 +56,12 @@ SUPPORTED_PREDICTION_PARSERS = {
     PREDICTION_PARSER_NONE,
     PREDICTION_PARSER_CACHEBLEND_QA,
 }
+REPAIR_PLANNER_ORACLE_HKVD = "oracle_hkvd"
+REPAIR_PLANNER_ONLINE_GRADUAL_HKVD = "online_gradual_hkvd"
+SUPPORTED_REPAIR_PLANNERS = {
+    REPAIR_PLANNER_ORACLE_HKVD,
+    REPAIR_PLANNER_ONLINE_GRADUAL_HKVD,
+}
 
 
 def parse_args() -> argparse.Namespace:
@@ -69,6 +76,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-new-tokens", type=int, default=16)
     parser.add_argument("--initial-top-k", type=int, default=10)
     parser.add_argument("--top-k", type=int, default=5)
+    parser.add_argument(
+        "--repair-planner",
+        choices=sorted(SUPPORTED_REPAIR_PLANNERS),
+        default=REPAIR_PLANNER_ONLINE_GRADUAL_HKVD,
+        help="Token-selection planner used by CacheBlend-style repair.",
+    )
     parser.add_argument(
         "--prompt-policy",
         choices=sorted(SUPPORTED_CACHEBLEND_PROMPT_POLICIES),
@@ -344,6 +357,71 @@ def build_cacheblend_repair_record(
     return method_record
 
 
+def build_online_cacheblend_repair_record(
+    generation: Any,
+    answers: list[str],
+    prediction_parser: str,
+    partial_repair_metadata: dict[str, Any],
+    phase_metrics: dict[str, dict[str, Any]],
+) -> dict[str, Any]:
+    method_record = evaluate_method_output(
+        generated_ids=generation.generated_ids,
+        generated_text=generation.output_text,
+        answers=answers,
+        prediction_parser=prediction_parser,
+    )
+    repair_latency_seconds = phase_latency_seconds(phase_metrics["online_repair"])
+    decode_latency_seconds = phase_latency_seconds(phase_metrics["decode"])
+    execution_latency_seconds = repair_latency_seconds + decode_latency_seconds
+    total_latency_seconds = sum(
+        phase_latency_seconds(phase_record)
+        for phase_record in phase_metrics.values()
+    )
+    method_record.update(
+        {
+            "repair_plan_strategy": partial_repair_metadata.get("repair_plan_strategy"),
+            "repair_planner": REPAIR_PLANNER_ONLINE_GRADUAL_HKVD,
+            "planning_latency_seconds": None,
+            "uses_full_recompute_reference": partial_repair_metadata.get(
+                "repair_plan_metadata",
+                {},
+            ).get("uses_full_recompute_reference"),
+            "rope_position_correction_applied": partial_repair_metadata.get(
+                "rope_position_correction_applied"
+            ),
+            "execution_mode": "online_gradual_hkvd",
+            "execution_uses_full_recompute_reference": partial_repair_metadata.get(
+                "execution_uses_full_recompute_reference"
+            ),
+            "planning_included_in_total_latency": False,
+            "execution_latency_seconds": execution_latency_seconds,
+            "reuse_precompute_latency_seconds": phase_latency_seconds(
+                phase_metrics["reuse_precompute"]
+            ),
+            "repair_latency_seconds": repair_latency_seconds,
+            "decode_latency_seconds": decode_latency_seconds,
+            "total_latency_seconds": total_latency_seconds,
+            "latency_seconds": total_latency_seconds,
+            "peak_gpu_memory_mb": max_phase_peak_memory_mb(phase_metrics),
+            "phase_metrics": phase_metrics,
+            "reuse_past_key_values_source": partial_repair_metadata.get(
+                "reuse_past_key_values_source"
+            ),
+            "runtime_selected_count": len(
+                partial_repair_metadata.get("runtime_selected_indices", [])
+            ),
+            "runtime_selection_mode": partial_repair_metadata.get(
+                "runtime_selection_mode"
+            ),
+            "layer_selected_counts": partial_repair_metadata.get(
+                "layer_selected_counts",
+                [],
+            ),
+        }
+    )
+    return method_record
+
+
 def build_example_record(
     example_index: int,
     example: Any,
@@ -353,6 +431,7 @@ def build_example_record(
     max_new_tokens: int,
     prompt_policy: str,
     prediction_parser: str,
+    repair_planner: str,
 ) -> dict[str, Any]:
     return {
         "example_index": example_index,
@@ -366,6 +445,7 @@ def build_example_record(
         "max_new_tokens": max_new_tokens,
         "prompt_policy": prompt_policy,
         "prediction_parser": prediction_parser,
+        "repair_planner": repair_planner,
         "methods": {},
     }
 
@@ -392,6 +472,7 @@ def run_methods_for_example(
     model_family: str,
     prediction_parser: str,
     enable_profiling: bool,
+    repair_planner: str,
 ) -> dict[str, dict[str, Any]]:
     method_records: dict[str, dict[str, Any]] = {}
     if METHOD_FULL_RECOMPUTE in methods:
@@ -458,7 +539,7 @@ def run_methods_for_example(
         )
         method_records[METHOD_NAIVE_REUSE] = naive_record
 
-    if METHOD_CACHEBLEND_REPAIR in methods:
+    if METHOD_CACHEBLEND_REPAIR in methods and repair_planner == REPAIR_PLANNER_ORACLE_HKVD:
         planning_artifacts, plan_profile = run_profiled_phase(
             lambda: prepare_cacheblend_repair_plan_with_artifacts(
                 model=model,
@@ -505,6 +586,50 @@ def run_methods_for_example(
             partial_repair_metadata=partial_repair.metadata,
             phase_metrics=repair_phase_metrics,
         )
+        method_records[METHOD_CACHEBLEND_REPAIR]["repair_planner"] = repair_planner
+
+    if METHOD_CACHEBLEND_REPAIR in methods and repair_planner == REPAIR_PLANNER_ONLINE_GRADUAL_HKVD:
+        online_reuse_kv, online_reuse_profile = run_profiled_phase(
+            lambda: precompute_reuse_doc_kv(
+                model=model,
+                tokenized_example=tokenized_example,
+                model_family=model_family,
+            ),
+            enable_profiling=enable_profiling,
+        )
+        partial_repair, online_repair_profile = run_profiled_phase(
+            lambda: run_cacheblend_style_online_partial_repair(
+                model=model,
+                tokenized_example=tokenized_example,
+                initial_top_k=initial_top_k,
+                top_k=top_k,
+                model_family=model_family,
+                reuse_past_key_values=online_reuse_kv,
+            ),
+            enable_profiling=enable_profiling,
+        )
+        repair_generation, repair_decode_profile = run_profiled_phase(
+            lambda: decode_with_past_key_values(
+                model=model,
+                tokenizer=tokenizer,
+                tokenized_example=tokenized_example,
+                past_key_values=partial_repair.repaired_past_key_values,
+                max_new_tokens=max_new_tokens,
+            ),
+            enable_profiling=enable_profiling,
+        )
+        repair_phase_metrics = {
+            "reuse_precompute": online_reuse_profile,
+            "online_repair": online_repair_profile,
+            "decode": repair_decode_profile,
+        }
+        method_records[METHOD_CACHEBLEND_REPAIR] = build_online_cacheblend_repair_record(
+            generation=repair_generation,
+            answers=answers,
+            prediction_parser=prediction_parser,
+            partial_repair_metadata=partial_repair.metadata,
+            phase_metrics=repair_phase_metrics,
+        )
     return method_records
 
 
@@ -520,6 +645,7 @@ def summarize_results(
     model_family: str,
     prompt_policy: str,
     prediction_parser: str,
+    repair_planner: str,
     metrics_by_method: dict[str, list[dict[str, float]]],
     resources_by_method: dict[str, list[dict[str, Any]]],
 ) -> dict[str, Any]:
@@ -550,6 +676,7 @@ def summarize_results(
         "model_family": model_family,
         "prompt_policy": prompt_policy,
         "prediction_parser": prediction_parser,
+        "repair_planner": repair_planner,
         "count": max((summary["count"] for summary in method_summaries.values()), default=0),
         "methods": method_summaries,
         "cacheblend_normalized_f1": normalized_f1,
@@ -591,6 +718,7 @@ def main() -> None:
                 max_new_tokens=args.max_new_tokens,
                 prompt_policy=args.prompt_policy,
                 prediction_parser=args.prediction_parser,
+                repair_planner=args.repair_planner,
             )
             try:
                 prompt = build_cacheblend_prompt(
@@ -612,6 +740,7 @@ def main() -> None:
                         model_family=args.model_family,
                         prediction_parser=args.prediction_parser,
                         enable_profiling=args.enable_profiling,
+                        repair_planner=args.repair_planner,
                     )
                 record["methods"] = method_records
                 for method, method_record in method_records.items():
@@ -640,6 +769,7 @@ def main() -> None:
         model_family=args.model_family,
         prompt_policy=args.prompt_policy,
         prediction_parser=args.prediction_parser,
+        repair_planner=args.repair_planner,
         metrics_by_method=metrics_by_method,
         resources_by_method=resources_by_method,
     )
