@@ -50,12 +50,12 @@ chunking, tokenization, or model execution.
 Validate local dataset parsing into `InputExample`:
 
 ```bash
-python experiments/00_smoke_test/dataset_loaders.py \
+python experiments/smoke_data_eval.py \
   --dataset musique \
   --input data/raw/musique/validation.jsonl \
   --limit 3
 
-python experiments/00_smoke_test/dataset_loaders.py \
+python experiments/smoke_data_eval.py \
   --dataset 2wiki \
   --input data/raw/2wiki/validation.jsonl \
   --limit 3
