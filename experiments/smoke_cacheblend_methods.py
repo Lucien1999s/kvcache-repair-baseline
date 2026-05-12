@@ -257,7 +257,10 @@ def main() -> None:
             f"oracle_reference_checks={repair_metadata['repair_oracle_reference_checks']}"
         )
     assert repair_metadata["execution_latency_seconds"] >= 0
-    assert repair_metadata["planning_included_in_total_latency"] is True
+    if args.repair_planner == REPAIR_PLANNER_ORACLE_HKVD:
+        assert repair_metadata["planning_included_in_total_latency"] is True
+    else:
+        assert repair_metadata["planning_included_in_total_latency"] is False
     assert repair_metadata["layer_selected_counts"], "repair must report selected counts by layer."
     assert repair_metadata["runtime_selection_mode"] in {
         "gradual_selected_indices_by_layer",
