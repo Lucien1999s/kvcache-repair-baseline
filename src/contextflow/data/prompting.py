@@ -3,6 +3,14 @@ from __future__ import annotations
 from contextflow.data.schema import Context, InputExample, PromptExample
 
 
+PROMPT_POLICY_DEFAULT = "default"
+PROMPT_POLICY_CACHEBLEND_QA = "cacheblend_qa"
+SUPPORTED_CACHEBLEND_PROMPT_POLICIES = {
+    PROMPT_POLICY_DEFAULT,
+    PROMPT_POLICY_CACHEBLEND_QA,
+}
+
+
 def format_cacheblend_context(ctx: Context) -> str:
     """Format one context passage the way CacheBlend prepares doc_prompts."""
 
@@ -20,13 +28,46 @@ def normalize_cacheblend_question(question: str) -> str:
     return normalized
 
 
-def build_cacheblend_prompt(example: InputExample, query_prompt: str = "") -> PromptExample:
+def validate_cacheblend_prompt_policy(prompt_policy: str) -> str:
+    normalized_policy = prompt_policy.lower()
+    if normalized_policy not in SUPPORTED_CACHEBLEND_PROMPT_POLICIES:
+        raise ValueError(
+            f"Unsupported prompt_policy={prompt_policy!r}. Supported policies: "
+            f"{sorted(SUPPORTED_CACHEBLEND_PROMPT_POLICIES)}."
+        )
+    return normalized_policy
+
+
+def build_cacheblend_query_prompt(
+    question: str,
+    query_prompt: str = "",
+    prompt_policy: str = PROMPT_POLICY_DEFAULT,
+) -> str:
+    """Build the query prompt for a CacheBlend-style QA example."""
+
+    policy = validate_cacheblend_prompt_policy(prompt_policy)
+    q = normalize_cacheblend_question(question)
+    if policy == PROMPT_POLICY_DEFAULT:
+        return f"{query_prompt}{q}\nAnswer:"
+    if policy == PROMPT_POLICY_CACHEBLEND_QA:
+        return f"{query_prompt}{q}\nAnswer within 5 words.\nAnswer:"
+    raise AssertionError(f"Unhandled prompt policy: {policy}")
+
+
+def build_cacheblend_prompt(
+    example: InputExample,
+    query_prompt: str = "",
+    prompt_policy: str = PROMPT_POLICY_DEFAULT,
+) -> PromptExample:
     """Convert a raw QA example into CacheBlend-style document and query prompts."""
 
-    q = normalize_cacheblend_question(example.question)
     return PromptExample(
         doc_prompts=[format_cacheblend_context(ctx) for ctx in example.ctxs],
-        q_prompt=f"{query_prompt}{q}\nAnswer:",
+        q_prompt=build_cacheblend_query_prompt(
+            example.question,
+            query_prompt=query_prompt,
+            prompt_policy=prompt_policy,
+        ),
         answers=list(example.answers),
         example_id=example.example_id,
     )
@@ -35,7 +76,15 @@ def build_cacheblend_prompt(example: InputExample, query_prompt: str = "") -> Pr
 def build_cacheblend_prompts(
     examples: list[InputExample],
     query_prompt: str = "",
+    prompt_policy: str = PROMPT_POLICY_DEFAULT,
 ) -> list[PromptExample]:
     """Format multiple QA examples with the same query prompt prefix."""
 
-    return [build_cacheblend_prompt(example, query_prompt=query_prompt) for example in examples]
+    return [
+        build_cacheblend_prompt(
+            example,
+            query_prompt=query_prompt,
+            prompt_policy=prompt_policy,
+        )
+        for example in examples
+    ]

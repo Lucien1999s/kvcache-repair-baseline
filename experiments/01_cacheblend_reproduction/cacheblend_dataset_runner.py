@@ -10,6 +10,8 @@ from typing import Any
 import torch
 
 from contextflow.data import (
+    PROMPT_POLICY_CACHEBLEND_QA,
+    SUPPORTED_CACHEBLEND_PROMPT_POLICIES,
     build_cacheblend_prompt,
     load_qa_dataset_examples,
     normalize_dataset_key,
@@ -49,6 +51,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-new-tokens", type=int, default=16)
     parser.add_argument("--initial-top-k", type=int, default=10)
     parser.add_argument("--top-k", type=int, default=5)
+    parser.add_argument(
+        "--prompt-policy",
+        choices=sorted(SUPPORTED_CACHEBLEND_PROMPT_POLICIES),
+        default=PROMPT_POLICY_CACHEBLEND_QA,
+        help="Prompt protocol used when formatting CacheBlend-style QA inputs.",
+    )
     parser.add_argument("--output-jsonl", required=True, help="Path for per-example JSONL results.")
     parser.add_argument("--torch-dtype", default="auto", help="torch_dtype passed to model load.")
     parser.add_argument("--device-map", default="auto", help="device_map passed to model load.")
@@ -188,6 +196,7 @@ def build_example_record(
     model_name: str,
     model_family: str,
     max_new_tokens: int,
+    prompt_policy: str,
 ) -> dict[str, Any]:
     return {
         "example_index": example_index,
@@ -199,6 +208,7 @@ def build_example_record(
         "model": model_name,
         "model_family": model_family,
         "max_new_tokens": max_new_tokens,
+        "prompt_policy": prompt_policy,
         "methods": {},
     }
 
@@ -261,6 +271,7 @@ def summarize_results(
     dataset_key: str,
     model_name: str,
     model_family: str,
+    prompt_policy: str,
     metrics_by_method: dict[str, list[dict[str, float]]],
 ) -> dict[str, Any]:
     method_summaries = {
@@ -284,6 +295,7 @@ def summarize_results(
         "dataset": dataset_key,
         "model": model_name,
         "model_family": model_family,
+        "prompt_policy": prompt_policy,
         "count": max((summary["count"] for summary in method_summaries.values()), default=0),
         "methods": method_summaries,
         "cacheblend_normalized_f1": normalized_f1,
@@ -322,9 +334,13 @@ def main() -> None:
                 model_name=args.model,
                 model_family=args.model_family,
                 max_new_tokens=args.max_new_tokens,
+                prompt_policy=args.prompt_policy,
             )
             try:
-                prompt = build_cacheblend_prompt(example)
+                prompt = build_cacheblend_prompt(
+                    example,
+                    prompt_policy=args.prompt_policy,
+                )
                 tokenized = tokenize_prompt_example(prompt, bundle.tokenizer)
                 with torch.inference_mode():
                     method_records = run_methods_for_example(
@@ -362,6 +378,7 @@ def main() -> None:
         dataset_key=dataset_key,
         model_name=args.model,
         model_family=args.model_family,
+        prompt_policy=args.prompt_policy,
         metrics_by_method=metrics_by_method,
     )
     print(json.dumps(summary, indent=2, ensure_ascii=False))

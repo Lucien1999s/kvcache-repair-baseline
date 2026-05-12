@@ -13,10 +13,15 @@ from contextflow.data.loaders import (
     parse_input_examples,
 )
 from contextflow.data.prompting import (
+    PROMPT_POLICY_CACHEBLEND_QA,
+    PROMPT_POLICY_DEFAULT,
+    SUPPORTED_CACHEBLEND_PROMPT_POLICIES,
+    build_cacheblend_query_prompt,
     build_cacheblend_prompt,
     build_cacheblend_prompts,
     format_cacheblend_context,
     normalize_cacheblend_question,
+    validate_cacheblend_prompt_policy,
 )
 from contextflow.data.schema import Context, InputExample, PromptExample, TokenizedExample
 from contextflow.data.tokenization import (
@@ -35,8 +40,12 @@ __all__ = [
     "AssembledInput",
     "assemble_token_aligned_full_prefill_input",
     "assemble_token_aligned_full_prefill_input_ids",
+    "PROMPT_POLICY_CACHEBLEND_QA",
+    "PROMPT_POLICY_DEFAULT",
+    "SUPPORTED_CACHEBLEND_PROMPT_POLICIES",
     "build_cacheblend_prompt",
     "build_cacheblend_prompts",
+    "build_cacheblend_query_prompt",
     "encode_cacheblend_text",
     "format_cacheblend_context",
     "load_json_examples",
@@ -49,4 +58,5 @@ __all__ = [
     "SUPPORTED_QA_DATASET_KEYS",
     "tokenize_prompt_example",
     "tokenize_prompt_examples",
+    "validate_cacheblend_prompt_policy",
 ]
