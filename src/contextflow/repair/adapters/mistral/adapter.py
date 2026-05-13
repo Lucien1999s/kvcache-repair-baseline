@@ -140,6 +140,13 @@ def compute_mistral_layer_qkv(layer: Any, hidden_states: Any) -> tuple[Any, Any,
     return split_mistral_qkv_heads(layer, query, key, value)
 
 
+def compute_mistral_layer_query(layer: Any, hidden_states: Any) -> Any:
+    """Compute Mistral attention query states before RoPE application."""
+
+    query, _, _ = compute_mistral_layer_qkv(layer, hidden_states)
+    return query
+
+
 def repeat_mistral_kv(hidden_states: Any, num_key_value_groups: int) -> Any:
     """Repeat KV heads for grouped-query attention."""
 

@@ -1,5 +1,6 @@
 from contextflow.repair.adapters.gpt2.adapter import (
     compute_gpt2_layer_qkv,
+    compute_gpt2_layer_query,
     compute_gpt2_selected_initial_hidden_states,
     get_gpt2_layer,
     patch_selected_kv,
@@ -19,6 +20,7 @@ from contextflow.repair.adapters.gpt2.runtime import (
 
 __all__ = [
     "compute_gpt2_layer_qkv",
+    "compute_gpt2_layer_query",
     "compute_gpt2_selected_initial_hidden_states",
     "get_gpt2_layer",
     "GPT2HKVDPatchResult",

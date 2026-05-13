@@ -114,6 +114,13 @@ def compute_gpt2_layer_qkv(layer: Any, hidden_states: Any) -> tuple[Any, Any, An
     )
 
 
+def compute_gpt2_layer_query(layer: Any, hidden_states: Any) -> Any:
+    """Compute GPT2 attention query states from layer input hidden states."""
+
+    query, _, _ = compute_gpt2_layer_qkv(layer, hidden_states)
+    return query
+
+
 def validate_selected_indices(selected_indices: list[int], seq_len: int) -> None:
     if not selected_indices:
         raise ValueError("selected_indices must be non-empty.")

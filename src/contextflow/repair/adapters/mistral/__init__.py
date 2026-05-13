@@ -1,5 +1,6 @@
 from contextflow.repair.adapters.mistral.adapter import (
     compute_mistral_layer_qkv,
+    compute_mistral_layer_query,
     compute_mistral_selected_initial_hidden_states,
     get_mistral_decoder,
     get_mistral_layer,
@@ -22,6 +23,7 @@ __all__ = [
     "correct_mistral_chunk_kv_rope_positions",
     "correct_mistral_chunk_kv_rope_source_positions",
     "compute_mistral_layer_qkv",
+    "compute_mistral_layer_query",
     "compute_mistral_selected_initial_hidden_states",
     "get_mistral_decoder",
     "get_mistral_layer",

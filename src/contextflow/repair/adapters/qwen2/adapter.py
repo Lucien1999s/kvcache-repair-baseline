@@ -138,6 +138,13 @@ def compute_qwen2_layer_qkv(layer: Any, hidden_states: Any) -> tuple[Any, Any, A
     return split_qwen2_qkv_heads(layer, query, key, value)
 
 
+def compute_qwen2_layer_query(layer: Any, hidden_states: Any) -> Any:
+    """Compute Qwen2 attention query states before RoPE application."""
+
+    query, _, _ = compute_qwen2_layer_qkv(layer, hidden_states)
+    return query
+
+
 def repeat_qwen2_kv(hidden_states: Any, num_key_value_groups: int) -> Any:
     """Repeat KV heads for grouped-query attention."""
 
