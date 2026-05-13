@@ -6,6 +6,13 @@ from typing import Any
 
 import torch
 
+from contextflow.benchmarks.constants import (
+    METHOD_CACHEBLEND_REPAIR,
+    METHOD_FULL_RECOMPUTE,
+    METHOD_NAIVE_REUSE,
+    REPAIR_PLANNER_ONLINE_GRADUAL_HKVD,
+    REPAIR_PLANNER_ORACLE_HKVD,
+)
 from contextflow.data import (
     build_cacheblend_prompt,
     parse_input_examples,
@@ -25,12 +32,6 @@ from contextflow.methods.naive_reuse import run_naive_reuse_generation
 from contextflow.profiling import timed_call
 from contextflow.runtime import load_hf_causal_lm
 
-
-METHOD_FULL_RECOMPUTE = "full_recompute"
-METHOD_NAIVE_REUSE = "naive_reuse"
-METHOD_CACHEBLEND_REPAIR = "cacheblend_repair"
-REPAIR_PLANNER_ORACLE_HKVD = "oracle_hkvd"
-REPAIR_PLANNER_ONLINE_GRADUAL_HKVD = "online_gradual_hkvd"
 
 INLINE_SAMPLE: list[dict[str, Any]] = [
     {
