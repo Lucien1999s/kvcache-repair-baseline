@@ -10,6 +10,7 @@ from contextflow.benchmarks.chunk_cases import (
 )
 from contextflow.benchmarks.constants import (
     METHOD_CACHEBLEND_REPAIR,
+    METHOD_FUSIONRAG_REPAIR,
     METHOD_FULL_RECOMPUTE,
     METHOD_NAIVE_REUSE,
     REPAIR_PLANNER_ONLINE_GRADUAL_HKVD,
@@ -24,6 +25,7 @@ from contextflow.benchmarks.errors import (
 from contextflow.benchmarks.evaluation import evaluate_method_generation
 from contextflow.benchmarks.method_runner import (
     build_cacheblend_repair_record,
+    build_fusionrag_repair_record,
     build_online_cacheblend_repair_record,
     decode_with_past_key_values,
     precompute_reuse_doc_kv,
@@ -42,6 +44,7 @@ from contextflow.methods.cacheblend_repair import (
     run_cacheblend_style_partial_repair_from_plan,
 )
 from contextflow.methods.full_recompute import run_token_aligned_full_recompute_greedy_generation
+from contextflow.methods.fusionrag_repair import run_fusionrag_style_repair_generation
 
 
 def run_full_recompute_method(
@@ -331,6 +334,51 @@ def run_cacheblend_repair_method(
     )
 
 
+def run_fusionrag_repair_method(
+    tokenized_example: Any,
+    model: Any,
+    tokenizer: Any,
+    answers: list[str],
+    max_new_tokens: int,
+    model_family: str,
+    prediction_parser: str,
+    enable_profiling: bool,
+    continue_on_error: bool,
+    fusionrag_neighbor_top_n: int,
+    fusionrag_recompute_ratio: float,
+) -> dict[str, Any]:
+    phase_metrics: dict[str, dict[str, Any]] = {}
+    result, fusionrag_profile, error = run_phase_capture(
+        "fusionrag_repair_generation",
+        lambda: run_fusionrag_style_repair_generation(
+            model=model,
+            tokenizer=tokenizer,
+            tokenized_example=tokenized_example,
+            max_new_tokens=max_new_tokens,
+            neighbor_top_n=fusionrag_neighbor_top_n,
+            recompute_ratio=fusionrag_recompute_ratio,
+            model_family=model_family,
+        ),
+        enable_profiling=enable_profiling,
+    )
+    phase_metrics["fusionrag_repair_generation"] = fusionrag_profile
+    if error is not None:
+        return handle_phase_error(
+            error,
+            failed_phase="fusionrag_repair_generation",
+            phase_metrics=phase_metrics,
+            continue_on_error=continue_on_error,
+        )
+
+    return build_fusionrag_repair_record(
+        result=result,
+        answers=answers,
+        prediction_parser=prediction_parser,
+        phase_metrics=phase_metrics,
+        include_status=True,
+    )
+
+
 def run_methods_for_sweep_case(
     methods: list[str],
     tokenized_example: Any,
@@ -345,6 +393,8 @@ def run_methods_for_sweep_case(
     enable_profiling: bool,
     continue_on_error: bool,
     repair_planner: str,
+    fusionrag_neighbor_top_n: int = 5,
+    fusionrag_recompute_ratio: float = 0.15,
 ) -> dict[str, dict[str, Any]]:
     method_records: dict[str, dict[str, Any]] = {}
     if METHOD_FULL_RECOMPUTE in methods:
@@ -384,6 +434,20 @@ def run_methods_for_sweep_case(
             enable_profiling=enable_profiling,
             continue_on_error=continue_on_error,
             repair_planner=repair_planner,
+        )
+    if METHOD_FUSIONRAG_REPAIR in methods:
+        method_records[METHOD_FUSIONRAG_REPAIR] = run_fusionrag_repair_method(
+            tokenized_example=tokenized_example,
+            model=model,
+            tokenizer=tokenizer,
+            answers=answers,
+            max_new_tokens=max_new_tokens,
+            model_family=model_family,
+            prediction_parser=prediction_parser,
+            enable_profiling=enable_profiling,
+            continue_on_error=continue_on_error,
+            fusionrag_neighbor_top_n=fusionrag_neighbor_top_n,
+            fusionrag_recompute_ratio=fusionrag_recompute_ratio,
         )
     return method_records
 

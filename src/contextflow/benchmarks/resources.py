@@ -64,8 +64,22 @@ def aggregate_resource_metrics(records: list[dict[str, Any]]) -> dict[str, Any]:
             records,
             "reuse_precompute_latency_seconds",
         ),
-        "mean_repair_latency_seconds": mean_optional_float(records, "repair_latency_seconds"),
-        "mean_decode_latency_seconds": mean_optional_float(records, "decode_latency_seconds"),
+        "mean_enriched_precompute_latency_seconds": mean_optional_float(
+            records,
+            "enriched_precompute_latency_seconds",
+        ),
+        "mean_selection_latency_seconds": mean_optional_float(
+            records,
+            "selection_latency_seconds",
+        ),
+        "mean_repair_latency_seconds": mean_optional_float(
+            records,
+            "repair_latency_seconds",
+        ),
+        "mean_decode_latency_seconds": mean_optional_float(
+            records,
+            "decode_latency_seconds",
+        ),
         "mean_execution_latency_seconds": mean_optional_float(
             records,
             "execution_latency_seconds",

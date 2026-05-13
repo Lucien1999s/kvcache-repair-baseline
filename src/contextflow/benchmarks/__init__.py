@@ -3,6 +3,7 @@ from __future__ import annotations
 from contextflow.benchmarks.constants import (
     DEFAULT_METHODS,
     METHOD_CACHEBLEND_REPAIR,
+    METHOD_FUSIONRAG_REPAIR,
     METHOD_FULL_RECOMPUTE,
     METHOD_NAIVE_REUSE,
     PREDICTION_PARSER_CACHEBLEND_QA,
@@ -20,6 +21,7 @@ from contextflow.benchmarks.constants import (
 __all__ = [
     "DEFAULT_METHODS",
     "METHOD_CACHEBLEND_REPAIR",
+    "METHOD_FUSIONRAG_REPAIR",
     "METHOD_FULL_RECOMPUTE",
     "METHOD_NAIVE_REUSE",
     "PREDICTION_PARSER_CACHEBLEND_QA",

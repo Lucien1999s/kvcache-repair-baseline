@@ -45,7 +45,7 @@ from contextflow.runtime import load_hf_causal_lm
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Chunk-count sweep runner for the CacheBlend-style HF/PyTorch reference baseline."
+            "Chunk-count sweep runner for HF/PyTorch reference baselines."
         )
     )
     parser.add_argument("--dataset", required=True, choices=["musique", "2wiki"])
@@ -61,6 +61,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-new-tokens", type=int, default=16)
     parser.add_argument("--initial-top-k", type=int, default=10)
     parser.add_argument("--top-k", type=int, default=5)
+    parser.add_argument(
+        "--fusionrag-neighbor-top-n",
+        type=int,
+        default=5,
+        help="Top-n similar neighbor chunks for FusionRAG enriched KV precompute.",
+    )
+    parser.add_argument(
+        "--fusionrag-recompute-ratio",
+        type=float,
+        default=0.15,
+        help="Fraction of document tokens selected by FusionRAG QGS for repair.",
+    )
     parser.add_argument(
         "--repair-planner",
         choices=sorted(SUPPORTED_REPAIR_PLANNERS),
@@ -86,7 +98,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--methods",
         default=",".join(DEFAULT_METHODS),
-        help="Comma-separated subset of full_recompute,naive_reuse,cacheblend_repair.",
+        help=(
+            "Comma-separated subset of full_recompute,naive_reuse,"
+            "cacheblend_repair,fusionrag_repair."
+        ),
     )
     parser.add_argument(
         "--continue-on-error",
@@ -172,6 +187,8 @@ def main() -> None:
                             enable_profiling=args.enable_profiling,
                             continue_on_error=args.continue_on_error,
                             repair_planner=args.repair_planner,
+                            fusionrag_neighbor_top_n=args.fusionrag_neighbor_top_n,
+                            fusionrag_recompute_ratio=args.fusionrag_recompute_ratio,
                         )
                     add_sweep_context_to_method_records(
                         method_records,

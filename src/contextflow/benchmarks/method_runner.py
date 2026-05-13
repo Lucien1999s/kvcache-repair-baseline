@@ -4,6 +4,7 @@ from typing import Any
 
 from contextflow.benchmarks.constants import (
     METHOD_CACHEBLEND_REPAIR,
+    METHOD_FUSIONRAG_REPAIR,
     METHOD_FULL_RECOMPUTE,
     METHOD_NAIVE_REUSE,
     REPAIR_PLANNER_ONLINE_GRADUAL_HKVD,
@@ -30,6 +31,10 @@ from contextflow.methods.cacheblend_repair import (
     run_cacheblend_style_partial_repair_from_plan,
 )
 from contextflow.methods.full_recompute import run_token_aligned_full_recompute_greedy_generation
+from contextflow.methods.fusionrag_repair import (
+    FusionRAGRepairResult,
+    run_fusionrag_style_repair_generation,
+)
 from contextflow.runtime.hf_cached_generation import generate_with_past_key_values
 
 
@@ -232,6 +237,68 @@ def build_online_cacheblend_repair_record(
     return method_record
 
 
+def build_fusionrag_repair_record(
+    result: FusionRAGRepairResult,
+    answers: list[str],
+    prediction_parser: str,
+    phase_metrics: dict[str, dict[str, Any]],
+    *,
+    include_status: bool = False,
+) -> dict[str, Any]:
+    method_record = evaluate_method_generation(
+        generated_ids=result.generated_ids,
+        generated_text=result.output_text,
+        answers=answers,
+        prediction_parser=prediction_parser,
+        include_status=include_status,
+    )
+    metadata = result.metadata
+    repair_latency_seconds = metadata.get("repair_latency_seconds")
+    decode_latency_seconds = metadata.get("decode_latency_seconds")
+    execution_latency_seconds = None
+    if repair_latency_seconds is not None and decode_latency_seconds is not None:
+        execution_latency_seconds = float(repair_latency_seconds) + float(
+            decode_latency_seconds
+        )
+    total_latency_seconds = total_phase_latency_seconds(phase_metrics)
+    method_record.update(
+        {
+            "method": metadata.get("method", METHOD_FUSIONRAG_REPAIR),
+            "neighbor_top_n": metadata.get("neighbor_top_n"),
+            "recompute_ratio": metadata.get("recompute_ratio"),
+            "selected_count": metadata.get("selected_count"),
+            "selected_indices": metadata.get("selected_indices", []),
+            "selected_indices_by_score": metadata.get("selected_indices_by_score", []),
+            "repair_plan_strategy": metadata.get("repair_plan_strategy"),
+            "runtime_selection_mode": metadata.get("runtime_selection_mode"),
+            "layer_selected_counts": metadata.get("layer_selected_counts", []),
+            "execution_uses_full_recompute_reference": metadata.get(
+                "execution_uses_full_recompute_reference"
+            ),
+            "planning_included_in_total_latency": False,
+            "enriched_precompute_latency_seconds": metadata.get(
+                "enriched_precompute_latency_seconds"
+            ),
+            "selection_latency_seconds": metadata.get("selection_latency_seconds"),
+            "repair_latency_seconds": repair_latency_seconds,
+            "decode_latency_seconds": decode_latency_seconds,
+            "execution_latency_seconds": execution_latency_seconds,
+            "method_internal_total_latency_seconds": metadata.get("total_latency_seconds"),
+            "total_latency_seconds": total_latency_seconds,
+            "latency_seconds": total_latency_seconds,
+            "peak_gpu_memory_mb": max_phase_peak_memory_mb(phase_metrics),
+            "phase_metrics": phase_metrics,
+            "enriched_precompute_metadata": metadata.get(
+                "enriched_precompute_metadata",
+                {},
+            ),
+            "query_selection_metadata": metadata.get("query_selection_metadata", {}),
+            "partial_repair_metadata": metadata.get("partial_repair_metadata", {}),
+        }
+    )
+    return method_record
+
+
 def run_methods_for_example(
     methods: list[str],
     tokenized_example: Any,
@@ -245,6 +312,8 @@ def run_methods_for_example(
     prediction_parser: str,
     enable_profiling: bool,
     repair_planner: str,
+    fusionrag_neighbor_top_n: int = 5,
+    fusionrag_recompute_ratio: float = 0.15,
 ) -> dict[str, dict[str, Any]]:
     method_records: dict[str, dict[str, Any]] = {}
     if METHOD_FULL_RECOMPUTE in methods:
@@ -409,5 +478,24 @@ def run_methods_for_example(
         raise ValueError(
             f"Unsupported repair_planner={repair_planner!r}. "
             f"Supported planners: {sorted(SUPPORTED_REPAIR_PLANNERS)}."
+        )
+    if METHOD_FUSIONRAG_REPAIR in methods:
+        fusionrag_result, fusionrag_profile = run_profiled_phase(
+            lambda: run_fusionrag_style_repair_generation(
+                model=model,
+                tokenizer=tokenizer,
+                tokenized_example=tokenized_example,
+                max_new_tokens=max_new_tokens,
+                neighbor_top_n=fusionrag_neighbor_top_n,
+                recompute_ratio=fusionrag_recompute_ratio,
+                model_family=model_family,
+            ),
+            enable_profiling=enable_profiling,
+        )
+        method_records[METHOD_FUSIONRAG_REPAIR] = build_fusionrag_repair_record(
+            result=fusionrag_result,
+            answers=answers,
+            prediction_parser=prediction_parser,
+            phase_metrics={"fusionrag_repair_generation": fusionrag_profile},
         )
     return method_records
