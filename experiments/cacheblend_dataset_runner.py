@@ -66,7 +66,9 @@ SUPPORTED_REPAIR_PLANNERS = {
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Dataset-level CacheBlend reproduction runner for local QA data."
+        description=(
+            "Dataset-level runner for the CacheBlend-style HF/PyTorch reference baseline."
+        )
     )
     parser.add_argument("--dataset", required=True, choices=["musique", "2wiki"])
     parser.add_argument("--input", required=True, help="Local JSON or JSONL dataset path.")
@@ -80,7 +82,10 @@ def parse_args() -> argparse.Namespace:
         "--repair-planner",
         choices=sorted(SUPPORTED_REPAIR_PLANNERS),
         default=REPAIR_PLANNER_ONLINE_GRADUAL_HKVD,
-        help="Token-selection planner used by CacheBlend-style repair.",
+        help=(
+            "Token-selection planner for repair. online_gradual_hkvd is the measured "
+            "baseline; oracle_hkvd is full-reference diagnostic mode."
+        ),
     )
     parser.add_argument(
         "--prompt-policy",

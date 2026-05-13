@@ -63,3 +63,40 @@ python experiments/smoke_data_eval.py \
 
 The repo dataset key `2wiki` refers to 2WikiMultiHopQA / 2WikiMQA-style
 multi-hop QA data.
+
+## CacheBlend-Style Runs
+
+The default repair planner is the measured online path:
+
+```bash
+python experiments/cacheblend_dataset_runner.py \
+  --dataset musique \
+  --input data/raw/musique/validation.jsonl \
+  --model mistralai/Mistral-7B-Instruct-v0.3 \
+  --model-family mistral \
+  --limit 10 \
+  --max-new-tokens 16 \
+  --output-jsonl results/cacheblend_musique_mistral_limit10.jsonl \
+  --device-map auto \
+  --torch-dtype auto
+```
+
+For memory-constrained diagnostics and OOM boundaries:
+
+```bash
+python experiments/cacheblend_chunk_sweep_runner.py \
+  --dataset musique \
+  --input data/raw/musique/validation.jsonl \
+  --model mistralai/Mistral-7B-Instruct-v0.3 \
+  --model-family mistral \
+  --limit 1 \
+  --chunk-counts 1,2,4,8,16,all \
+  --max-new-tokens 16 \
+  --output-jsonl results/chunk_sweep_musique_mistral_limit1.jsonl \
+  --device-map auto \
+  --torch-dtype auto
+```
+
+Both runners default to `--repair-planner online_gradual_hkvd`. Use
+`--repair-planner oracle_hkvd` only for diagnostic checks that intentionally
+use full-reference KV.

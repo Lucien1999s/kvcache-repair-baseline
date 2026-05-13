@@ -77,7 +77,9 @@ SUPPORTED_REPAIR_PLANNERS = {
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Chunk-count sweep diagnostic runner for CacheBlend-style baselines."
+        description=(
+            "Chunk-count sweep runner for the CacheBlend-style HF/PyTorch reference baseline."
+        )
     )
     parser.add_argument("--dataset", required=True, choices=["musique", "2wiki"])
     parser.add_argument("--input", required=True, help="Local JSON or JSONL dataset path.")
@@ -96,7 +98,10 @@ def parse_args() -> argparse.Namespace:
         "--repair-planner",
         choices=sorted(SUPPORTED_REPAIR_PLANNERS),
         default=REPAIR_PLANNER_ONLINE_GRADUAL_HKVD,
-        help="Token-selection planner used by CacheBlend-style repair.",
+        help=(
+            "Token-selection planner for repair. online_gradual_hkvd is the measured "
+            "baseline; oracle_hkvd is full-reference diagnostic mode."
+        ),
     )
     parser.add_argument(
         "--prompt-policy",
@@ -330,6 +335,7 @@ def build_failure_record(
     status = STATUS_OOM if is_oom_error(error) else STATUS_ERROR
     return {
         "status": status,
+        "error_is_oom": status == STATUS_OOM,
         "failed_phase": failed_phase,
         "error": serialize_error(error),
         "phase_metrics": phase_metrics,
@@ -353,6 +359,44 @@ def handle_phase_error(
         failed_phase=failed_phase,
         phase_metrics=phase_metrics,
     )
+
+
+def build_case_failure_record(
+    error: Exception,
+    *,
+    example_index: int,
+    example: InputExample,
+    dataset_key: str,
+    model_name: str,
+    model_family: str,
+    prompt_policy: str,
+    prediction_parser: str,
+    repair_planner: str,
+    chunk_case: dict[str, Any],
+    token_counts: dict[str, int] | None = None,
+) -> dict[str, Any]:
+    status = STATUS_OOM if is_oom_error(error) else STATUS_ERROR
+    if status == STATUS_OOM:
+        clear_cuda_cache_after_failure()
+    return {
+        "record_type": "chunk_sweep_case",
+        "status": status,
+        "error_is_oom": status == STATUS_OOM,
+        "failed_scope": "sweep_case_setup_or_unhandled_method_error",
+        "example_index": example_index,
+        "example_id": example.example_id,
+        "dataset": dataset_key,
+        "requested_chunk_count": chunk_case["requested_chunk_count"],
+        "chunk_count": chunk_case["chunk_count"],
+        "available_chunk_count": chunk_case["available_chunk_count"],
+        "model": model_name,
+        "model_family": model_family,
+        "prompt_policy": prompt_policy,
+        "prediction_parser": prediction_parser,
+        "repair_planner": repair_planner,
+        **dict(token_counts or {}),
+        "error": serialize_error(error),
+    }
 
 
 def parse_prediction_for_evaluation(raw_generated_text: str, prediction_parser: str) -> str:
@@ -1113,6 +1157,7 @@ def main() -> None:
                     full_example,
                     chunk_count=int(chunk_case["chunk_count"]),
                 )
+                token_counts: dict[str, int] = {}
                 try:
                     prompt = build_cacheblend_prompt(
                         sliced_example,
@@ -1161,23 +1206,21 @@ def main() -> None:
                     for method, method_record in method_records.items():
                         method_outcomes[method].append(method_record)
                 except Exception as error:
-                    record = {
-                        "record_type": "chunk_sweep_case",
-                        "example_index": example_index,
-                        "example_id": full_example.example_id,
-                        "dataset": dataset_key,
-                        "requested_chunk_count": chunk_case["requested_chunk_count"],
-                        "chunk_count": chunk_case["chunk_count"],
-                        "available_chunk_count": chunk_case["available_chunk_count"],
-                        "model": args.model,
-                        "model_family": args.model_family,
-                        "prompt_policy": args.prompt_policy,
-                        "prediction_parser": args.prediction_parser,
-                        "repair_planner": args.repair_planner,
-                        "error": serialize_error(error),
-                    }
+                    record = build_case_failure_record(
+                        error,
+                        example_index=example_index,
+                        example=full_example,
+                        dataset_key=dataset_key,
+                        model_name=args.model,
+                        model_family=args.model_family,
+                        prompt_policy=args.prompt_policy,
+                        prediction_parser=args.prediction_parser,
+                        repair_planner=args.repair_planner,
+                        chunk_case=chunk_case,
+                        token_counts=token_counts,
+                    )
                     write_jsonl_record(output_file, record)
-                    if args.continue_on_error:
+                    if args.continue_on_error or record["status"] == STATUS_OOM:
                         continue
                     raise
 
