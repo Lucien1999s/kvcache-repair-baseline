@@ -15,10 +15,12 @@ from contextflow.repair.adapters.qwen2.runtime import (
 )
 from contextflow.repair.adapters.qwen2.rope import (
     correct_qwen2_chunk_kv_rope_positions,
+    correct_qwen2_chunk_kv_rope_source_positions,
 )
 
 __all__ = [
     "correct_qwen2_chunk_kv_rope_positions",
+    "correct_qwen2_chunk_kv_rope_source_positions",
     "compute_qwen2_layer_qkv",
     "compute_qwen2_selected_initial_hidden_states",
     "get_qwen2_decoder",

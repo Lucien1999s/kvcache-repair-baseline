@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 
@@ -14,3 +14,4 @@ class ChunkKV:
     num_tokens: int
     num_layers: int
     device: str | None = None
+    metadata: dict[str, Any] = field(default_factory=dict)

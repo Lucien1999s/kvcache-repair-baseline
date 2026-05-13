@@ -102,8 +102,68 @@ def correct_mistral_chunk_kv_rope_positions(
                 num_tokens=chunk_kv.num_tokens,
                 num_layers=chunk_kv.num_layers,
                 device=chunk_kv.device,
+                metadata=dict(chunk_kv.metadata),
             )
         )
         absolute_offset += chunk_kv.num_tokens
 
     return corrected_chunks
+
+
+def correct_mistral_chunk_kv_rope_source_positions(
+    model: Any,
+    chunk_kv: ChunkKV,
+    source_positions: list[int],
+    target_positions: list[int],
+) -> ChunkKV:
+    """Correct one Mistral chunk KV from precompute positions to target positions."""
+
+    validate_mistral_like_model(model)
+    if chunk_kv.num_tokens != len(source_positions):
+        raise ValueError(
+            "source_positions length must match chunk token count; "
+            f"got {len(source_positions)} and {chunk_kv.num_tokens}."
+        )
+    if chunk_kv.num_tokens != len(target_positions):
+        raise ValueError(
+            "target_positions length must match chunk token count; "
+            f"got {len(target_positions)} and {chunk_kv.num_tokens}."
+        )
+
+    corrected_layers = []
+    for layer_index, layer_kv in enumerate(chunk_kv.past_key_values):
+        key, value = layer_kv[0], layer_kv[1]
+        if source_positions == target_positions:
+            corrected_key = key
+        else:
+            layer = get_mistral_layer(model, layer_index)
+            source_cos, source_sin = compute_mistral_rotary_embeddings_for_positions(
+                model=model,
+                layer=layer,
+                reference_tensor=key,
+                positions=source_positions,
+            )
+            target_cos, target_sin = compute_mistral_rotary_embeddings_for_positions(
+                model=model,
+                layer=layer,
+                reference_tensor=key,
+                positions=target_positions,
+            )
+            corrected_key = correct_rope_key_positions(
+                key=key,
+                local_cos=source_cos,
+                local_sin=source_sin,
+                absolute_cos=target_cos,
+                absolute_sin=target_sin,
+            )
+        corrected_layers.append((corrected_key, value))
+
+    return ChunkKV(
+        chunk_id=chunk_kv.chunk_id,
+        input_ids=list(chunk_kv.input_ids),
+        past_key_values=tuple(corrected_layers),
+        num_tokens=chunk_kv.num_tokens,
+        num_layers=chunk_kv.num_layers,
+        device=chunk_kv.device,
+        metadata=dict(chunk_kv.metadata),
+    )

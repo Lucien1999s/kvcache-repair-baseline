@@ -15,10 +15,12 @@ from contextflow.repair.adapters.mistral.runtime import (
 )
 from contextflow.repair.adapters.mistral.rope import (
     correct_mistral_chunk_kv_rope_positions,
+    correct_mistral_chunk_kv_rope_source_positions,
 )
 
 __all__ = [
     "correct_mistral_chunk_kv_rope_positions",
+    "correct_mistral_chunk_kv_rope_source_positions",
     "compute_mistral_layer_qkv",
     "compute_mistral_selected_initial_hidden_states",
     "get_mistral_decoder",
