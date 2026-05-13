@@ -1,46 +1,110 @@
 # ContextFlow
 
-Research prototype for RAG KV cache reuse, repair, and memory workflows.
+ContextFlow is a research artifact for studying retrieval-augmented generation
+under KV-cache reuse, repair, and memory constraints. The current repository
+contains a CacheBlend-style HF/PyTorch reference baseline, dataset preparation
+utilities for MuSiQue and 2Wiki-style QA data, QA evaluation metrics, and
+diagnostic runners for latency, peak GPU memory, and chunk-count/OOM sweeps.
 
-This repository implements a **CacheBlend-style HF/PyTorch reference
-baseline** for controlled research comparisons. It is not an official
-CacheBlend/vLLM serving-system reproduction.
+This is not an official CacheBlend/vLLM serving-system reproduction. The
+baseline reproduces the core KV reuse and selective repair workflow in a
+controlled HF/PyTorch environment so later FusionRAG and ContextFlow methods can
+be compared on the same data, model, prompt, and metric pipeline.
 
-Current main comparison path:
+## Repository Layout
 
-1. Data pipeline: `JSON -> InputExample -> PromptExample -> TokenizedExample`
-2. Token-aligned full recompute greedy: `concat(doc_chunk_ids) + q_ids -> greedy decode`
-3. Naive KV reuse greedy: `doc_chunk_ids -> precomputed doc KV -> concat KV -> feed q_ids -> greedy decode`
-4. CacheBlend-style repair:
-   - measured baseline: online gradual HKVD selection and adapter-specific
-     partial repair, without full-reference KV during measured execution
-   - diagnostic mode: oracle HKVD selection from reused-vs-full doc KV, used
-     only to inspect repair correctness and upper-bound selection behavior
+```text
+src/contextflow/
+  data/          Input schemas, dataset loaders, prompt formatting, tokenization
+  methods/       Full recompute, naive KV reuse, CacheBlend-style repair
+  repair/        HKVD selector and model-family repair adapters
+  kv_cache/      KV precompute, assembly, and RoPE position correction
+  evaluation/    QA answer parsing and EM/F1 metrics
+  profiling/     Timing and peak-memory helpers
+  benchmarks/    Shared benchmark execution, records, and sweep utilities
 
-The current baseline substrate does not include retrieval, reranking, chunking,
-vLLM hooks, or scheduling. Dataset inputs are expected to provide passages.
-
-## Experiments
-
-Run from the repo root after installing the package in editable mode.
-
-```bash
-python3 experiments/smoke_data_eval.py
-python3 experiments/smoke_cacheblend_methods.py --model sshleifer/tiny-gpt2 --model-family gpt2
+experiments/     Thin CLI entrypoints for smoke checks and baseline runs
+configs/         Dataset preparation configs
+scripts/         Dataset preparation utilities
+docs/            Setup, baseline notes, and ContextFlow design notes
 ```
 
-- `experiments/smoke_data_eval.py`: no-model smoke for dataset parsing,
-  CacheBlend QA prompt policy, prediction parsing, QA metrics, and profiling helpers.
-- `experiments/smoke_cacheblend_methods.py`: tiny-model smoke that runs the
-  three comparison methods on the same inline QA example: full recompute,
-  naive KV reuse, and CacheBlend-style repair.
-- `experiments/cacheblend_dataset_runner.py`: dataset-level runner for local
-  MuSiQue / 2Wiki JSONL files. It writes per-example JSONL and prints aggregate
-  EM/F1 plus CacheBlend normalized F1.
-- `experiments/cacheblend_chunk_sweep_runner.py`: diagnostic runner that sweeps
-  context chunk counts, records token counts, latency, peak GPU memory, and OOM
-  boundaries for full recompute, naive KV reuse, and CacheBlend-style repair.
+## Quick Start
 
-The repair runner option `--repair-planner online_gradual_hkvd` is the default
-measured baseline. Use `--repair-planner oracle_hkvd` only for diagnostics that
-explicitly need full-reference KV.
+Install the package in editable mode from the repository root:
+
+```bash
+pip install -e .
+```
+
+Run the lightweight no-model smoke check:
+
+```bash
+python experiments/smoke_data_eval.py
+```
+
+Run the baseline method smoke check with a local or HuggingFace model:
+
+```bash
+python experiments/smoke_cacheblend_methods.py \
+  --model mistralai/Mistral-7B-Instruct-v0.3 \
+  --model-family mistral \
+  --device-map auto \
+  --torch-dtype auto
+```
+
+Prepare a small MuSiQue subset:
+
+```bash
+pip install -e ".[datasets]"
+python scripts/prepare_dataset.py \
+  --config configs/datasets/musique.yaml \
+  --limit 100 \
+  --overwrite
+```
+
+Run a dataset-level baseline comparison:
+
+```bash
+python experiments/cacheblend_dataset_runner.py \
+  --dataset musique \
+  --input data/raw/musique/validation.jsonl \
+  --model mistralai/Mistral-7B-Instruct-v0.3 \
+  --model-family mistral \
+  --limit 2 \
+  --max-new-tokens 16 \
+  --output-jsonl results/cacheblend_musique_mistral_limit2.jsonl \
+  --device-map auto \
+  --torch-dtype auto
+```
+
+Run a chunk-count diagnostic sweep:
+
+```bash
+python experiments/cacheblend_chunk_sweep_runner.py \
+  --dataset musique \
+  --input data/raw/musique/validation.jsonl \
+  --model mistralai/Mistral-7B-Instruct-v0.3 \
+  --model-family mistral \
+  --limit 1 \
+  --chunk-counts 1,2,4,8,16,all \
+  --max-new-tokens 16 \
+  --output-jsonl results/chunk_sweep_musique_mistral_limit1.jsonl \
+  --device-map auto \
+  --torch-dtype auto
+```
+
+## Documentation
+
+- [Setup](docs/setup.md): environment, dataset preparation, and smoke checks.
+- [Baseline Notes](docs/baseline_notes.md): Full Recompute, Naive KV Reuse, and
+  CacheBlend-style repair baseline definitions.
+- [ContextFlow Notes](docs/contextflow_notes.md): placeholder for the upcoming
+  ContextFlow/FusionRAG method design.
+
+## Scope
+
+The current codebase does not include retrieval, reranking, custom chunking,
+vLLM hooks, request scheduling, or CPU/GPU KV-store switching. Dataset inputs are
+expected to provide passages/chunks. Those system components are reserved for
+the next ContextFlow development phase.

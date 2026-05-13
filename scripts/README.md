@@ -1,0 +1,24 @@
+# Scripts
+
+Scripts are operational entrypoints for preparing local artifacts. They should
+not contain model methods, benchmark logic, or retrieval algorithms.
+
+## `prepare_dataset.py`
+
+Prepare local JSONL files from dataset configs:
+
+```bash
+python scripts/prepare_dataset.py \
+  --config configs/datasets/musique.yaml \
+  --limit 100 \
+  --overwrite
+```
+
+Supported source types:
+
+- `huggingface`: uses the `datasets` package to download a configured split.
+- `local`: reads an existing local JSON or JSONL file and rewrites a limited
+  JSONL subset.
+
+The script only prepares local data files. It does not perform retrieval,
+reranking, chunking, tokenization, or model execution.
