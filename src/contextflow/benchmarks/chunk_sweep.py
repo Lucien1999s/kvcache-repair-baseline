@@ -247,6 +247,7 @@ def run_cacheblend_repair_method(
             prediction_parser=prediction_parser,
             partial_repair_metadata=partial_repair.metadata,
             phase_metrics=phase_metrics,
+            include_status=True,
         )
 
     if repair_planner != REPAIR_PLANNER_ORACLE_HKVD:
@@ -326,6 +327,7 @@ def run_cacheblend_repair_method(
         repair_plan=repair_plan,
         partial_repair_metadata=partial_repair.metadata,
         phase_metrics=phase_metrics,
+        include_status=True,
     )
 
 

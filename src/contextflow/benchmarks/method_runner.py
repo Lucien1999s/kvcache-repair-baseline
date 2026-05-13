@@ -112,12 +112,15 @@ def build_cacheblend_repair_record(
     repair_plan: CacheBlendRepairPlan,
     partial_repair_metadata: dict[str, Any],
     phase_metrics: dict[str, dict[str, Any]],
+    *,
+    include_status: bool = False,
 ) -> dict[str, Any]:
     method_record = evaluate_method_generation(
         generated_ids=generation.generated_ids,
         generated_text=generation.output_text,
         answers=answers,
         prediction_parser=prediction_parser,
+        include_status=include_status,
     )
     repair_plan_metadata = repair_plan.metadata
     planning_latency_seconds = phase_latency_seconds(phase_metrics["plan"])
@@ -170,12 +173,15 @@ def build_online_cacheblend_repair_record(
     prediction_parser: str,
     partial_repair_metadata: dict[str, Any],
     phase_metrics: dict[str, dict[str, Any]],
+    *,
+    include_status: bool = False,
 ) -> dict[str, Any]:
     method_record = evaluate_method_generation(
         generated_ids=generation.generated_ids,
         generated_text=generation.output_text,
         answers=answers,
         prediction_parser=prediction_parser,
+        include_status=include_status,
     )
     repair_latency_seconds = phase_latency_seconds(phase_metrics["online_repair"])
     decode_latency_seconds = phase_latency_seconds(phase_metrics["decode"])
