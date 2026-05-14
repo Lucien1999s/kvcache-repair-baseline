@@ -148,6 +148,19 @@ def mean_optional_float(records: list[dict[str, Any]], key: str) -> float | None
     return sum(values) / len(values)
 
 
+def aggregate_selected_phase_metrics(
+    records: list[dict[str, Any]],
+    phase_names: list[str],
+) -> dict[str, float | None]:
+    fields: dict[str, float | None] = {}
+    for phase_name in phase_names:
+        for suffix in ("latency_seconds", "peak_gpu_memory_delta_mb"):
+            key = f"{phase_name}_{suffix}"
+            if any(key in record for record in records):
+                fields[f"mean_{key}"] = mean_optional_float(records, key)
+    return fields
+
+
 def aggregate_resource_metrics(records: list[dict[str, Any]]) -> dict[str, Any]:
     return {
         "mean_latency_seconds": mean_optional_float(records, "latency_seconds"),
@@ -189,18 +202,5 @@ def aggregate_resource_metrics(records: list[dict[str, Any]]) -> dict[str, Any]:
             records,
             "execution_latency_seconds",
         ),
-        **{
-            f"mean_{phase_name}_latency_seconds": mean_optional_float(
-                records,
-                f"{phase_name}_latency_seconds",
-            )
-            for phase_name in FUSIONRAG_PROFILE_PHASES
-        },
-        **{
-            f"mean_{phase_name}_peak_gpu_memory_delta_mb": mean_optional_float(
-                records,
-                f"{phase_name}_peak_gpu_memory_delta_mb",
-            )
-            for phase_name in FUSIONRAG_PROFILE_PHASES
-        },
+        **aggregate_selected_phase_metrics(records, FUSIONRAG_PROFILE_PHASES),
     }

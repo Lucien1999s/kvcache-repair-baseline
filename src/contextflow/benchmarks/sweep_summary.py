@@ -10,7 +10,10 @@ from contextflow.benchmarks.constants import (
     STATUS_SKIPPED_TOO_LONG,
     STATUS_SUCCESS,
 )
-from contextflow.benchmarks.resources import mean_optional_float
+from contextflow.benchmarks.resources import (
+    aggregate_selected_phase_metrics,
+    mean_optional_float,
+)
 from contextflow.evaluation import aggregate_qa_metrics
 
 
@@ -69,20 +72,7 @@ def summarize_success_records(records: list[dict[str, Any]]) -> dict[str, Any]:
                 records,
                 "execution_latency_seconds",
             ),
-            **{
-                f"mean_{phase_name}_latency_seconds": mean_optional_float(
-                    records,
-                    f"{phase_name}_latency_seconds",
-                )
-                for phase_name in FUSIONRAG_PROFILE_PHASES
-            },
-            **{
-                f"mean_{phase_name}_peak_gpu_memory_delta_mb": mean_optional_float(
-                    records,
-                    f"{phase_name}_peak_gpu_memory_delta_mb",
-                )
-                for phase_name in FUSIONRAG_PROFILE_PHASES
-            },
+            **aggregate_selected_phase_metrics(records, FUSIONRAG_PROFILE_PHASES),
         }
     )
     return summary
