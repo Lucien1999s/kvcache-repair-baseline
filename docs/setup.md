@@ -45,21 +45,33 @@ python scripts/prepare_dataset.py \
   --overwrite
 ```
 
+Prepare a LongBook-QA-English / InfiniteBench subset for token-chunked memory
+diagnostics:
+
+```bash
+python scripts/prepare_dataset.py \
+  --config configs/datasets/longbook_qa_en.yaml \
+  --limit 10 \
+  --overwrite
+```
+
 Prepare the configured full split by omitting `--limit`:
 
 ```bash
 python scripts/prepare_dataset.py --config configs/datasets/musique.yaml --overwrite
 python scripts/prepare_dataset.py --config configs/datasets/2wiki.yaml --overwrite
+python scripts/prepare_dataset.py --config configs/datasets/longbook_qa_en.yaml --overwrite
 ```
 
 The repo dataset key `2wiki` refers to 2WikiMultiHopQA / 2WikiMQA-style
 multi-hop QA data.
 
-The repo dataset key `longbook_qa_en` supports local LongBook-QA-English /
-generic long-context QA JSON/JSONL rows. Expected fields are flexible, but a row
-should provide a question-like field (`question`, `query`, or `input`), an
-answer field (`answers` or `answer`), and a long context field (`context`,
-`document`, `article`, `book`, or `text`).
+The repo dataset key `longbook_qa_en` refers to LongBook-QA-English /
+InfiniteBench `longbook_qa_eng`, and also supports compatible local long-context
+QA JSON/JSONL rows. Expected fields are flexible, but a row should provide a
+question-like field (`question`, `query`, or `input`), an answer field
+(`answers` or `answer`), and a long context field (`context`, `document`,
+`article`, `book`, or `text`).
 
 The preparation script writes local JSONL only. It does not run retrieval,
 reranking, chunking, tokenization, or model execution.

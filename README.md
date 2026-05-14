@@ -77,6 +77,15 @@ python scripts/prepare_dataset.py \
   --overwrite
 ```
 
+Prepare a LongBook-QA-English subset for token-chunked memory diagnostics:
+
+```bash
+python scripts/prepare_dataset.py \
+  --config configs/datasets/longbook_qa_en.yaml \
+  --limit 10 \
+  --overwrite
+```
+
 Run a dataset-level baseline comparison:
 
 ```bash

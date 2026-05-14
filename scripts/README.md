@@ -14,6 +14,15 @@ python scripts/prepare_dataset.py \
   --overwrite
 ```
 
+Long-context memory diagnostics use LongBook-QA-English / InfiniteBench:
+
+```bash
+python scripts/prepare_dataset.py \
+  --config configs/datasets/longbook_qa_en.yaml \
+  --limit 10 \
+  --overwrite
+```
+
 Supported source types:
 
 - `huggingface`: uses the `datasets` package to download a configured split.

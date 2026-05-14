@@ -1,0 +1,11 @@
+# LongBook-QA-English refers to InfiniteBench longbook_qa_eng.
+# Repo dataset key is normalized as longbook_qa_en.
+dataset_key: longbook_qa_en
+source:
+  type: huggingface
+  name: xinrongzhang2022/InfiniteBench
+  split: longbook_qa_eng
+output:
+  local_path: data/raw/longbook_qa_en/test.jsonl
+  format: jsonl
+sample_size: null
