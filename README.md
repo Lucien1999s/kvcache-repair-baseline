@@ -5,20 +5,23 @@ under KV-cache reuse, repair, and memory constraints. The current repository
 contains a CacheBlend-style HF/PyTorch reference baseline, dataset preparation
 utilities for MuSiQue and 2Wiki-style QA data, QA evaluation metrics, and
 diagnostic runners for latency, peak GPU memory, and chunk-count/OOM sweeps.
+It also includes a FusionRAG-style HF/PyTorch baseline built on the same data,
+method, evaluation, and profiling substrate.
 
 This is not an official CacheBlend/vLLM serving-system reproduction. The
 baseline reproduces the core KV reuse and selective repair workflow in a
-controlled HF/PyTorch environment so later FusionRAG and ContextFlow methods can
-be compared on the same data, model, prompt, and metric pipeline.
+controlled HF/PyTorch environment so CacheBlend-style, FusionRAG-style, and
+future ContextFlow methods can be compared on the same data, model, prompt, and
+metric pipeline.
 
 ## Repository Layout
 
 ```text
 src/contextflow/
   data/          Input schemas, dataset loaders, prompt formatting, tokenization
-  methods/       Full recompute, naive KV reuse, CacheBlend-style repair
-  repair/        HKVD selector and model-family repair adapters
-  kv_cache/      KV precompute, assembly, and RoPE position correction
+  methods/       Full recompute, naive reuse, CacheBlend-style, FusionRAG-style
+  repair/        HKVD/QGS selectors and model-family repair adapters
+  kv_cache/      KV precompute, enriched precompute, assembly, RoPE correction
   evaluation/    QA answer parsing and EM/F1 metrics
   profiling/     Timing and peak-memory helpers
   benchmarks/    Shared benchmark execution, records, and sweep utilities
@@ -53,6 +56,16 @@ python experiments/smoke_cacheblend_methods.py \
   --torch-dtype auto
 ```
 
+Run the FusionRAG-style method smoke check:
+
+```bash
+python experiments/smoke_fusionrag_method.py \
+  --model Qwen/Qwen2.5-7B-Instruct \
+  --model-family qwen2 \
+  --device-map auto \
+  --torch-dtype auto
+```
+
 Prepare a small MuSiQue subset:
 
 ```bash
@@ -73,6 +86,9 @@ python experiments/cacheblend_dataset_runner.py \
   --model-family mistral \
   --limit 2 \
   --max-new-tokens 16 \
+  --methods full_recompute,naive_reuse,cacheblend_repair,fusionrag_repair \
+  --fusionrag-neighbor-top-n 1 \
+  --fusionrag-recompute-ratio 0.15 \
   --output-jsonl results/cacheblend_musique_mistral_limit2.jsonl \
   --device-map auto \
   --torch-dtype auto
@@ -89,6 +105,9 @@ python experiments/cacheblend_chunk_sweep_runner.py \
   --limit 1 \
   --chunk-counts 1,2,4,8,16,all \
   --max-new-tokens 16 \
+  --methods full_recompute,naive_reuse,cacheblend_repair,fusionrag_repair \
+  --fusionrag-neighbor-top-n 1 \
+  --fusionrag-recompute-ratio 0.15 \
   --output-jsonl results/chunk_sweep_musique_mistral_limit1.jsonl \
   --device-map auto \
   --torch-dtype auto
@@ -97,14 +116,15 @@ python experiments/cacheblend_chunk_sweep_runner.py \
 ## Documentation
 
 - [Setup](docs/setup.md): environment, dataset preparation, and smoke checks.
-- [Baseline Notes](docs/baseline_notes.md): Full Recompute, Naive KV Reuse, and
-  CacheBlend-style repair baseline definitions.
-- [ContextFlow Notes](docs/contextflow_notes.md): placeholder for the upcoming
-  ContextFlow/FusionRAG method design.
+- [Baseline Notes](docs/baseline_notes.md): Full Recompute, Naive KV Reuse,
+  CacheBlend-style repair, and FusionRAG-style repair baseline definitions.
+- [ContextFlow Notes](docs/contextflow_notes.md): notes for upcoming
+  memory-constrained ContextFlow development.
 
 ## Scope
 
-The current codebase does not include retrieval, reranking, custom chunking,
-vLLM hooks, request scheduling, or CPU/GPU KV-store switching. Dataset inputs are
-expected to provide passages/chunks. Those system components are reserved for
-the next ContextFlow development phase.
+The current codebase does not include retrieval/reranking pipelines, token-based
+long-document chunking, vLLM hooks, request scheduling, or CPU/GPU KV-store
+switching. Dataset inputs are expected to provide passages/chunks. Long-context
+chunking and KV-store/offload components are reserved for the next ContextFlow
+development phases.

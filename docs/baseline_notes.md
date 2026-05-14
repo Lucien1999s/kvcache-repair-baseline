@@ -1,7 +1,7 @@
 # Baseline Notes
 
 This document defines the baseline methods currently implemented in ContextFlow.
-These baselines are used for controlled comparison before adding FusionRAG or
+These baselines are used for controlled comparison before adding
 ContextFlow-specific scheduling and KV-store policies.
 
 ## Scope
@@ -11,10 +11,10 @@ not claim to reproduce the official CacheBlend vLLM serving system. In
 particular, it does not include vLLM block management, request scheduling,
 production batching, CPU/GPU KV-store switching, or compute/load overlap.
 
-The implemented baseline is best described as:
+The implemented baselines are best described as:
 
 ```text
-CacheBlend-style HF/PyTorch reference baseline
+HF/PyTorch reference baselines for KV reuse and repair
 ```
 
 ## Shared Input Layout
@@ -67,6 +67,30 @@ Supported repair adapters currently include:
 - Mistral-like models
 - Qwen2/Qwen2.5-like models
 
+### FusionRAG-Style Repair
+
+`fusionrag_repair` is implemented as a method-level HF/PyTorch reference
+baseline on top of the same tokenized QA inputs and partial-repair primitives.
+It follows the core FusionRAG-style path currently needed for baseline
+comparison:
+
+```text
+doc chunks -> neighbor-enriched KV precompute -> QGS token selection
+           -> selected-token repair -> q_ids decode
+```
+
+The current implementation includes:
+
+- example-local top-n neighbor planning for enriched chunk precompute
+- neighbor-prefix target chunk KV precompute
+- RoPE source-position correction for Mistral/Qwen2-style models
+- query-guided token selection from final-layer query-key attention scores
+- recompute-ratio controlled selected-token repair
+
+It intentionally does not include FusionRAG serving-system components such as
+Alternative Path, async KV-cache scheduling, Q-Sparse-Attn kernels, corpus-level
+KV stores, batching, or CPU/GPU KV placement.
+
 ## Repair Planner Modes
 
 ### `online_gradual_hkvd`
@@ -112,8 +136,17 @@ When reporting results, distinguish:
 - Full Recompute: full-context upper-bound method
 - Naive KV Reuse: unrepaired reuse baseline
 - CacheBlend-style Repair: online gradual HKVD repair baseline
+- FusionRAG-style Repair: neighbor-enriched KV plus QGS repair baseline
 - Oracle-HKVD: diagnostic mode only
 
 Dataset-level runners report EM/F1, normalized F1, latency, phase latency, and
 peak GPU memory. Chunk sweep runners additionally report token counts and OOM
 boundaries.
+
+Use FusionRAG explicitly in runners:
+
+```text
+--methods full_recompute,naive_reuse,cacheblend_repair,fusionrag_repair
+--fusionrag-neighbor-top-n 1
+--fusionrag-recompute-ratio 0.15
+```

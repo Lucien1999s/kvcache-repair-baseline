@@ -90,6 +90,16 @@ python experiments/smoke_cacheblend_methods.py \
   --torch-dtype auto
 ```
 
+Run the FusionRAG-style method smoke check:
+
+```bash
+python experiments/smoke_fusionrag_method.py \
+  --model Qwen/Qwen2.5-7B-Instruct \
+  --model-family qwen2 \
+  --device-map auto \
+  --torch-dtype auto
+```
+
 Run oracle-HKVD diagnostic mode when checking full-reference repair diagnostics:
 
 ```bash
@@ -113,6 +123,9 @@ python experiments/cacheblend_dataset_runner.py \
   --model-family mistral \
   --limit 10 \
   --max-new-tokens 16 \
+  --methods full_recompute,naive_reuse,cacheblend_repair,fusionrag_repair \
+  --fusionrag-neighbor-top-n 1 \
+  --fusionrag-recompute-ratio 0.15 \
   --output-jsonl results/cacheblend_musique_mistral_limit10.jsonl \
   --device-map auto \
   --torch-dtype auto
@@ -129,6 +142,9 @@ python experiments/cacheblend_chunk_sweep_runner.py \
   --limit 1 \
   --chunk-counts 1,2,4,8,16,all \
   --max-new-tokens 16 \
+  --methods full_recompute,naive_reuse,cacheblend_repair,fusionrag_repair \
+  --fusionrag-neighbor-top-n 1 \
+  --fusionrag-recompute-ratio 0.15 \
   --output-jsonl results/chunk_sweep_musique_mistral_limit1.jsonl \
   --device-map auto \
   --torch-dtype auto
@@ -137,3 +153,7 @@ python experiments/cacheblend_chunk_sweep_runner.py \
 Both runners default to `--repair-planner online_gradual_hkvd`. Use
 `--repair-planner oracle_hkvd` only for diagnostic checks that intentionally use
 full-reference KV.
+
+FusionRAG is not part of the default method list yet. Add
+`fusionrag_repair` explicitly through `--methods` when comparing all four
+baselines.
