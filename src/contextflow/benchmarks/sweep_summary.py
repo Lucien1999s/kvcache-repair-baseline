@@ -3,7 +3,12 @@ from __future__ import annotations
 from collections import defaultdict
 from typing import Any
 
-from contextflow.benchmarks.constants import STATUS_ERROR, STATUS_OOM, STATUS_SUCCESS
+from contextflow.benchmarks.constants import (
+    STATUS_ERROR,
+    STATUS_OOM,
+    STATUS_SKIPPED_TOO_LONG,
+    STATUS_SUCCESS,
+)
 from contextflow.benchmarks.resources import mean_optional_float
 from contextflow.evaluation import aggregate_qa_metrics
 
@@ -27,6 +32,14 @@ def summarize_success_records(records: list[dict[str, Any]]) -> dict[str, Any]:
             "mean_latency_seconds": mean_optional_float(records, "latency_seconds"),
             "mean_total_latency_seconds": mean_optional_float(records, "total_latency_seconds"),
             "mean_peak_gpu_memory_mb": mean_optional_float(records, "peak_gpu_memory_mb"),
+            "mean_baseline_gpu_memory_mb": mean_optional_float(
+                records,
+                "baseline_gpu_memory_mb",
+            ),
+            "mean_peak_gpu_memory_delta_mb": mean_optional_float(
+                records,
+                "peak_gpu_memory_delta_mb",
+            ),
             "mean_planning_latency_seconds": mean_optional_float(
                 records,
                 "planning_latency_seconds",
@@ -111,6 +124,11 @@ def summarize_by_chunk_count(records: list[dict[str, Any]]) -> dict[str, Any]:
             "error_count": sum(
                 1 for record in chunk_records if record.get("status") == STATUS_ERROR
             ),
+            "skipped_too_long_count": sum(
+                1
+                for record in chunk_records
+                if record.get("status") == STATUS_SKIPPED_TOO_LONG
+            ),
             "mean_doc_token_count": mean_optional_float(chunk_records, "doc_token_count"),
             "mean_total_prefill_token_count": mean_optional_float(
                 chunk_records,
@@ -147,6 +165,11 @@ def summarize_sweep_results(
                 ),
                 "error_count": sum(
                     1 for record in records if record.get("status") == STATUS_ERROR
+                ),
+                "skipped_too_long_count": sum(
+                    1
+                    for record in records
+                    if record.get("status") == STATUS_SKIPPED_TOO_LONG
                 ),
                 **summarize_oom_boundary(records),
                 "by_chunk_count": summarize_by_chunk_count(records),

@@ -37,7 +37,7 @@ from contextflow.benchmarks.method_runner import (
     precompute_reuse_doc_kv,
 )
 from contextflow.benchmarks.resources import (
-    max_phase_peak_memory_mb,
+    memory_summary_record,
     phase_latency_seconds,
     total_phase_latency_seconds,
 )
@@ -95,7 +95,7 @@ def run_full_recompute_method(
             "phase_metrics": phase_metrics,
             "latency_seconds": total_phase_latency_seconds(phase_metrics),
             "total_latency_seconds": total_phase_latency_seconds(phase_metrics),
-            "peak_gpu_memory_mb": max_phase_peak_memory_mb(phase_metrics),
+            **memory_summary_record(phase_metrics),
         }
     )
     return method_record
@@ -165,7 +165,7 @@ def run_naive_reuse_method(
             "decode_latency_seconds": phase_latency_seconds(decode_profile),
             "latency_seconds": total_phase_latency_seconds(phase_metrics),
             "total_latency_seconds": total_phase_latency_seconds(phase_metrics),
-            "peak_gpu_memory_mb": max_phase_peak_memory_mb(phase_metrics),
+            **memory_summary_record(phase_metrics),
             "assembled_kv_layers": len(reuse_doc_kv),
             "rope_position_correction_applied": rope_position_correction_enabled(
                 model_family
@@ -503,9 +503,10 @@ def add_sweep_context_to_method_records(
     token_counts: dict[str, int],
     chunking_config: dict[str, Any] | None = None,
 ) -> None:
-    for method_record in method_records.values():
+    for method, method_record in method_records.items():
         method_record.update(
             {
+                "method": method,
                 "example_index": example_index,
                 "example_id": example_id,
                 "requested_chunk_count": chunk_case["requested_chunk_count"],

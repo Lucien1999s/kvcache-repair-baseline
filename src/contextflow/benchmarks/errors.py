@@ -7,11 +7,12 @@ from typing import Any
 
 from contextflow.benchmarks.constants import STATUS_ERROR, STATUS_OOM
 from contextflow.benchmarks.resources import (
-    max_phase_peak_memory_mb,
+    memory_summary_record,
     total_phase_latency_seconds,
 )
 from contextflow.data import InputExample
 from contextflow.profiling import (
+    get_allocated_memory_mb_if_available,
     get_peak_memory_mb_if_available,
     reset_peak_memory_stats_if_available,
     synchronize_cuda_if_available,
@@ -59,9 +60,11 @@ def run_phase_capture(
     *,
     enable_profiling: bool,
 ) -> tuple[Any | None, dict[str, Any], Exception | None]:
+    baseline_memory_mb = None
     if enable_profiling:
-        reset_peak_memory_stats_if_available()
         safe_synchronize_cuda()
+        baseline_memory_mb = get_allocated_memory_mb_if_available()
+        reset_peak_memory_stats_if_available()
 
     start = time.perf_counter()
     try:
@@ -73,8 +76,15 @@ def run_phase_capture(
         }
         if enable_profiling:
             peak_gpu_memory_mb = get_peak_memory_mb_if_available()
+            if baseline_memory_mb is not None:
+                profile_record["baseline_gpu_memory_mb"] = baseline_memory_mb
             if peak_gpu_memory_mb is not None:
                 profile_record["peak_gpu_memory_mb"] = peak_gpu_memory_mb
+            if baseline_memory_mb is not None and peak_gpu_memory_mb is not None:
+                profile_record["peak_gpu_memory_delta_mb"] = max(
+                    0.0,
+                    peak_gpu_memory_mb - baseline_memory_mb,
+                )
         return result, profile_record, None
     except Exception as error:
         if enable_profiling:
@@ -86,8 +96,15 @@ def run_phase_capture(
         }
         if enable_profiling:
             peak_gpu_memory_mb = get_peak_memory_mb_if_available()
+            if baseline_memory_mb is not None:
+                profile_record["baseline_gpu_memory_mb"] = baseline_memory_mb
             if peak_gpu_memory_mb is not None:
                 profile_record["peak_gpu_memory_mb"] = peak_gpu_memory_mb
+            if baseline_memory_mb is not None and peak_gpu_memory_mb is not None:
+                profile_record["peak_gpu_memory_delta_mb"] = max(
+                    0.0,
+                    peak_gpu_memory_mb - baseline_memory_mb,
+                )
         if is_oom_error(error):
             clear_cuda_cache_after_failure()
         return None, profile_record, error
@@ -107,7 +124,7 @@ def build_failure_record(
         "phase_metrics": phase_metrics,
         "latency_seconds": total_phase_latency_seconds(phase_metrics),
         "total_latency_seconds": total_phase_latency_seconds(phase_metrics),
-        "peak_gpu_memory_mb": max_phase_peak_memory_mb(phase_metrics),
+        **memory_summary_record(phase_metrics),
     }
 
 

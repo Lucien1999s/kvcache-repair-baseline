@@ -44,6 +44,31 @@ def max_phase_peak_memory_mb(phase_metrics: dict[str, dict[str, Any]]) -> float 
     return max(peaks)
 
 
+def first_phase_baseline_memory_mb(
+    phase_metrics: dict[str, dict[str, Any]],
+) -> float | None:
+    for phase_record in phase_metrics.values():
+        if phase_record.get("baseline_gpu_memory_mb") is not None:
+            return float(phase_record["baseline_gpu_memory_mb"])
+    return None
+
+
+def peak_memory_delta_mb(phase_metrics: dict[str, dict[str, Any]]) -> float | None:
+    baseline = first_phase_baseline_memory_mb(phase_metrics)
+    peak = max_phase_peak_memory_mb(phase_metrics)
+    if baseline is None or peak is None:
+        return None
+    return max(0.0, peak - baseline)
+
+
+def memory_summary_record(phase_metrics: dict[str, dict[str, Any]]) -> dict[str, float | None]:
+    return {
+        "baseline_gpu_memory_mb": first_phase_baseline_memory_mb(phase_metrics),
+        "peak_gpu_memory_mb": max_phase_peak_memory_mb(phase_metrics),
+        "peak_gpu_memory_delta_mb": peak_memory_delta_mb(phase_metrics),
+    }
+
+
 def mean_optional_float(records: list[dict[str, Any]], key: str) -> float | None:
     values = [float(record[key]) for record in records if record.get(key) is not None]
     if not values:
@@ -56,6 +81,14 @@ def aggregate_resource_metrics(records: list[dict[str, Any]]) -> dict[str, Any]:
         "mean_latency_seconds": mean_optional_float(records, "latency_seconds"),
         "mean_total_latency_seconds": mean_optional_float(records, "total_latency_seconds"),
         "mean_peak_gpu_memory_mb": mean_optional_float(records, "peak_gpu_memory_mb"),
+        "mean_baseline_gpu_memory_mb": mean_optional_float(
+            records,
+            "baseline_gpu_memory_mb",
+        ),
+        "mean_peak_gpu_memory_delta_mb": mean_optional_float(
+            records,
+            "peak_gpu_memory_delta_mb",
+        ),
         "mean_planning_latency_seconds": mean_optional_float(
             records,
             "planning_latency_seconds",

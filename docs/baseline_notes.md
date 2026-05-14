@@ -139,9 +139,11 @@ When reporting results, distinguish:
 - FusionRAG-style Repair: neighbor-enriched KV plus QGS repair baseline
 - Oracle-HKVD: diagnostic mode only
 
-Dataset-level runners report EM/F1, normalized F1, latency, phase latency, and
-peak GPU memory. Chunk sweep runners additionally report token counts and OOM
-boundaries.
+Dataset-level runners report EM/F1, normalized F1, latency, phase latency, raw
+peak GPU memory, and peak GPU memory delta. Chunk sweep runners additionally
+report token counts, chunking config, explicit too-long skips, and OOM
+boundaries. For memory plots, prefer `peak_gpu_memory_delta_mb` over raw
+`peak_gpu_memory_mb` because the raw peak includes model weights.
 
 Use FusionRAG explicitly in runners:
 

@@ -136,12 +136,19 @@ python experiments/cacheblend_chunk_sweep_runner.py \
   --chunk-size-tokens 1024 \
   --chunk-overlap-tokens 0 \
   --max-chunks 128 \
+  --max-total-tokens 131072 \
   --chunk-counts 8,16,32,64,128,all \
   --methods full_recompute,naive_reuse,cacheblend_repair,fusionrag_repair \
   --output-jsonl results/longbook_qwen2_7b_token_sweep.jsonl \
   --device-map auto \
   --torch-dtype auto
 ```
+
+Chunk sweeps record `baseline_gpu_memory_mb`, `peak_gpu_memory_mb`, and
+`peak_gpu_memory_delta_mb`; memory-constrained plots should generally use the
+delta field so model weights do not dominate the KV/cache signal. Use
+`--max-total-tokens` to skip over-budget cases explicitly rather than silently
+truncating prompts.
 
 ## Documentation
 

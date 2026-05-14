@@ -19,9 +19,10 @@ has initial support for:
 - chunk sweeps over configurable `chunk_size_tokens`, `chunk_overlap_tokens`,
   and `max_chunks`
 - OOM-safe sweep records with method, chunk count, token count, and failed phase
-
-The next diagnostic refinement should add peak GPU memory delta reporting in
-addition to absolute peak memory.
+- peak GPU memory delta reporting for separating model weight memory from
+  chunk/KV growth
+- explicit `--max-total-tokens` budget guard that records `skipped_too_long`
+  instead of silently truncating
 
 This keeps the baseline diagnostic clean: it measures how the four reference
 methods behave as retrieved/chunked context grows, without mixing in a new

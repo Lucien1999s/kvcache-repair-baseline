@@ -183,6 +183,7 @@ python experiments/cacheblend_chunk_sweep_runner.py \
   --chunk-size-tokens 1024 \
   --chunk-overlap-tokens 0 \
   --max-chunks 128 \
+  --max-total-tokens 131072 \
   --chunk-counts 8,16,32,64,128,all \
   --max-new-tokens 16 \
   --methods full_recompute,naive_reuse,cacheblend_repair,fusionrag_repair \
@@ -192,6 +193,12 @@ python experiments/cacheblend_chunk_sweep_runner.py \
   --device-map auto \
   --torch-dtype auto
 ```
+
+For memory diagnostic figures, prefer `peak_gpu_memory_delta_mb` over raw
+`peak_gpu_memory_mb`; the raw peak includes model weights, while the delta is
+measured relative to allocated GPU memory before each method run. If a case
+exceeds `--max-total-tokens`, the runner records `status=skipped_too_long`
+instead of silently truncating.
 
 Both runners default to `--repair-planner online_gradual_hkvd`. Use
 `--repair-planner oracle_hkvd` only for diagnostic checks that intentionally use

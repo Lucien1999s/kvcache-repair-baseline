@@ -6,6 +6,7 @@ from contextlib import contextmanager
 from typing import Optional, TypeVar
 
 from contextflow.profiling.memory import (
+    get_allocated_memory_mb_if_available,
     get_peak_memory_mb_if_available,
     get_torch_if_available,
     reset_peak_memory_stats_if_available,
@@ -53,12 +54,23 @@ def timed_call(
 ) -> tuple[T, ProfileRecord]:
     """Run a callable and return its result plus a JSON-serializable profile record."""
 
+    baseline_memory_mb = None
     if collect_peak_memory:
+        if synchronize_cuda:
+            synchronize_cuda_if_available()
+        baseline_memory_mb = get_allocated_memory_mb_if_available()
         reset_peak_memory_stats_if_available()
     with synchronized_timer(synchronize_cuda=synchronize_cuda) as record:
         result = fn()
     if collect_peak_memory:
         peak_memory_mb = get_peak_memory_mb_if_available()
+        if baseline_memory_mb is not None:
+            record["baseline_gpu_memory_mb"] = baseline_memory_mb
         if peak_memory_mb is not None:
             record["peak_gpu_memory_mb"] = peak_memory_mb
+        if baseline_memory_mb is not None and peak_memory_mb is not None:
+            record["peak_gpu_memory_delta_mb"] = max(
+                0.0,
+                peak_memory_mb - baseline_memory_mb,
+            )
     return result, record

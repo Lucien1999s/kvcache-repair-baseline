@@ -13,7 +13,7 @@ from contextflow.benchmarks.constants import (
 )
 from contextflow.benchmarks.evaluation import evaluate_method_generation
 from contextflow.benchmarks.resources import (
-    max_phase_peak_memory_mb,
+    memory_summary_record,
     phase_latency_seconds,
     run_profiled_phase,
     total_phase_latency_seconds,
@@ -159,7 +159,7 @@ def build_cacheblend_repair_record(
             "decode_latency_seconds": decode_latency_seconds,
             "total_latency_seconds": total_latency_seconds,
             "latency_seconds": total_latency_seconds,
-            "peak_gpu_memory_mb": max_phase_peak_memory_mb(phase_metrics),
+            **memory_summary_record(phase_metrics),
             "phase_metrics": phase_metrics,
             "reuse_past_key_values_source": partial_repair_metadata.get(
                 "reuse_past_key_values_source"
@@ -217,7 +217,7 @@ def build_online_cacheblend_repair_record(
             "decode_latency_seconds": decode_latency_seconds,
             "total_latency_seconds": total_latency_seconds,
             "latency_seconds": total_latency_seconds,
-            "peak_gpu_memory_mb": max_phase_peak_memory_mb(phase_metrics),
+            **memory_summary_record(phase_metrics),
             "phase_metrics": phase_metrics,
             "reuse_past_key_values_source": partial_repair_metadata.get(
                 "reuse_past_key_values_source"
@@ -286,7 +286,7 @@ def build_fusionrag_repair_record(
             "method_internal_total_latency_seconds": metadata.get("total_latency_seconds"),
             "total_latency_seconds": total_latency_seconds,
             "latency_seconds": total_latency_seconds,
-            "peak_gpu_memory_mb": max_phase_peak_memory_mb(phase_metrics),
+            **memory_summary_record(phase_metrics),
             "phase_metrics": phase_metrics,
             "enriched_precompute_metadata": metadata.get(
                 "enriched_precompute_metadata",
@@ -331,9 +331,7 @@ def run_methods_for_example(
         full_record["phase_metrics"] = {"generation": full_profile}
         full_record["latency_seconds"] = phase_latency_seconds(full_profile)
         full_record["total_latency_seconds"] = phase_latency_seconds(full_profile)
-        full_record["peak_gpu_memory_mb"] = max_phase_peak_memory_mb(
-            full_record["phase_metrics"]
-        )
+        full_record.update(memory_summary_record(full_record["phase_metrics"]))
         method_records[METHOD_FULL_RECOMPUTE] = full_record
 
     if METHOD_NAIVE_REUSE in methods:
@@ -371,7 +369,7 @@ def run_methods_for_example(
                 "decode_latency_seconds": naive_decode_latency_seconds,
                 "total_latency_seconds": naive_total_latency_seconds,
                 "latency_seconds": naive_total_latency_seconds,
-                "peak_gpu_memory_mb": max_phase_peak_memory_mb(naive_phase_metrics),
+                **memory_summary_record(naive_phase_metrics),
                 "assembled_kv_layers": len(naive_reuse_kv),
                 "rope_position_correction_applied": rope_position_correction_enabled(
                     model_family

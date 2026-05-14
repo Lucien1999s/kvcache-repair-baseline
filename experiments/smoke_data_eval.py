@@ -181,6 +181,12 @@ def assert_profiling() -> None:
     if "peak_gpu_memory_mb" in profile_record:
         assert profile_record["peak_gpu_memory_mb"] is not None
         assert profile_record["peak_gpu_memory_mb"] >= 0
+    if "baseline_gpu_memory_mb" in profile_record:
+        assert profile_record["baseline_gpu_memory_mb"] is not None
+        assert profile_record["baseline_gpu_memory_mb"] >= 0
+    if "peak_gpu_memory_delta_mb" in profile_record:
+        assert profile_record["peak_gpu_memory_delta_mb"] is not None
+        assert profile_record["peak_gpu_memory_delta_mb"] >= 0
     json.dumps(profile_record)
 
 

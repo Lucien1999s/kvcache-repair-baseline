@@ -29,6 +29,7 @@ from contextflow.benchmarks.constants import (
     PREDICTION_PARSER_CACHEBLEND_QA,
     REPAIR_PLANNER_ONLINE_GRADUAL_HKVD,
     STATUS_OOM,
+    STATUS_SKIPPED_TOO_LONG,
     SUPPORTED_PREDICTION_PARSERS,
     SUPPORTED_REPAIR_PLANNERS,
 )
@@ -95,6 +96,15 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Maximum produced token chunks when --chunking token.",
     )
+    parser.add_argument(
+        "--max-total-tokens",
+        type=int,
+        default=None,
+        help=(
+            "Skip sweep cases whose doc+query prefill tokens exceed this budget. "
+            "No truncation is applied."
+        ),
+    )
     parser.add_argument("--max-new-tokens", type=int, default=16)
     parser.add_argument("--initial-top-k", type=int, default=10)
     parser.add_argument("--top-k", type=int, default=5)
@@ -154,6 +164,24 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def build_too_long_method_records(
+    methods: list[str],
+    *,
+    max_total_tokens: int,
+    token_counts: dict[str, int],
+) -> dict[str, dict[str, Any]]:
+    return {
+        method: {
+            "method": method,
+            "status": STATUS_SKIPPED_TOO_LONG,
+            "skip_reason": "total_prefill_token_count_exceeds_max_total_tokens",
+            "max_total_tokens": max_total_tokens,
+            **token_counts,
+        }
+        for method in methods
+    }
+
+
 def main() -> None:
     args = parse_args()
     dataset_key = normalize_dataset_key(args.dataset)
@@ -170,6 +198,10 @@ def main() -> None:
         ),
         max_chunks=args.max_chunks if chunking_mode == CHUNKING_MODE_TOKEN else None,
     )
+    if args.max_total_tokens is not None:
+        if args.max_total_tokens <= 0:
+            raise ValueError("--max-total-tokens must be positive when provided.")
+        summary_chunking_config["max_total_tokens"] = args.max_total_tokens
     if args.limit is not None and args.limit <= 0:
         raise ValueError("--limit must be positive.")
 
@@ -254,7 +286,9 @@ def main() -> None:
             for prepared_case in prepared_cases:
                 chunk_case = prepared_case["chunk_case"]
                 sliced_example = prepared_case["example"]
-                chunking_config = prepared_case["chunking_config"]
+                chunking_config = dict(prepared_case["chunking_config"])
+                if args.max_total_tokens is not None:
+                    chunking_config["max_total_tokens"] = args.max_total_tokens
                 token_counts: dict[str, int] = {}
                 try:
                     tokenized = prepared_case["tokenized"]
@@ -280,6 +314,38 @@ def main() -> None:
                         token_counts=token_counts,
                         chunking_config=chunking_config,
                     )
+                    if (
+                        args.max_total_tokens is not None
+                        and token_counts["total_prefill_token_count"] > args.max_total_tokens
+                    ):
+                        method_records = build_too_long_method_records(
+                            methods,
+                            max_total_tokens=args.max_total_tokens,
+                            token_counts=token_counts,
+                        )
+                        add_sweep_context_to_method_records(
+                            method_records,
+                            example_index=example_index,
+                            example_id=sliced_example.example_id,
+                            chunk_case=chunk_case,
+                            token_counts=token_counts,
+                            chunking_config=chunking_config,
+                        )
+                        record.update(
+                            {
+                                "status": STATUS_SKIPPED_TOO_LONG,
+                                "skip_reason": (
+                                    "total_prefill_token_count_exceeds_max_total_tokens"
+                                ),
+                                "max_total_tokens": args.max_total_tokens,
+                                "methods": method_records,
+                            }
+                        )
+                        for method, method_record in method_records.items():
+                            method_outcomes[method].append(method_record)
+                        write_jsonl_record(output_file, record)
+                        continue
+
                     with torch.inference_mode():
                         method_records = run_methods_for_sweep_case(
                             methods=methods,
