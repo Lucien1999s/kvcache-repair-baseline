@@ -1,0 +1,10 @@
+# 2wiki refers to 2WikiMultiHopQA / 2WikiMQA-style multi-hop QA data.
+dataset_key: 2wiki
+source:
+  type: huggingface
+  name: framolfese/2WikiMultihopQA
+  split: validation
+output:
+  local_path: data/raw/2wiki/validation.jsonl
+  format: jsonl
+sample_size: null

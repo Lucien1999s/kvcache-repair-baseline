@@ -1,0 +1,9 @@
+dataset_key: musique
+source:
+  type: huggingface
+  name: awinml/musique
+  split: validation
+output:
+  local_path: data/raw/musique/validation.jsonl
+  format: jsonl
+sample_size: null

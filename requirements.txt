@@ -1,0 +1,5 @@
+torch
+transformers
+# Optional for scripts/prepare_dataset.py:
+# datasets
+# pyyaml

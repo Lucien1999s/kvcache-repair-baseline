@@ -1,0 +1,56 @@
+# Python bytecode and caches
+__pycache__/
+*.py[cod]
+*.pyc
+*.pyo
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Packaging and build artifacts
+build/
+dist/
+*.egg-info/
+
+# Local environment files
+.env
+.env.*
+!.env.example
+
+# IDE and OS files
+.DS_Store
+.idea/
+.vscode/
+
+# Experiment outputs
+results/*
+!results/.gitkeep
+/logs/
+/runs/
+/wandb/
+
+# Large local artifacts
+/data/raw/
+/data/processed/
+/data/**/*.jsonl
+/datasets/
+/checkpoints/
+/models/
+/artifacts/
+*.pt
+*.pth
+*.safetensors
+*.bin
+
+# HuggingFace and PyTorch caches
+.cache/
+hf_cache/
+torch_cache/
