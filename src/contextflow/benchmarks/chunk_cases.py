@@ -5,6 +5,21 @@ from typing import Any
 from contextflow.data import InputExample
 
 
+CHUNKING_MODE_CONTEXT = "context"
+CHUNKING_MODE_TOKEN = "token"
+SUPPORTED_CHUNKING_MODES = {CHUNKING_MODE_CONTEXT, CHUNKING_MODE_TOKEN}
+
+
+def validate_chunking_mode(chunking_mode: str) -> str:
+    normalized_mode = chunking_mode.strip().lower()
+    if normalized_mode not in SUPPORTED_CHUNKING_MODES:
+        raise ValueError(
+            f"Unsupported chunking mode {chunking_mode!r}. "
+            f"Supported modes: {sorted(SUPPORTED_CHUNKING_MODES)}."
+        )
+    return normalized_mode
+
+
 def parse_chunk_count_specs(raw_counts: str) -> list[int | str]:
     specs: list[int | str] = []
     for part in raw_counts.split(","):
@@ -27,9 +42,18 @@ def resolve_example_chunk_cases(
     example: InputExample,
     chunk_count_specs: list[int | str],
 ) -> list[dict[str, Any]]:
-    available_count = len(example.ctxs)
+    return resolve_chunk_cases_for_available_count(
+        available_count=len(example.ctxs),
+        chunk_count_specs=chunk_count_specs,
+    )
+
+
+def resolve_chunk_cases_for_available_count(
+    available_count: int,
+    chunk_count_specs: list[int | str],
+) -> list[dict[str, Any]]:
     if available_count <= 0:
-        raise ValueError(f"Example {example.example_id!r} has no contexts to sweep.")
+        raise ValueError("available_count must be positive.")
 
     cases: list[dict[str, Any]] = []
     seen_counts: set[int] = set()
@@ -85,3 +109,24 @@ def token_count_record(tokenized_example: Any) -> dict[str, int]:
         "query_token_count": query_count,
         "total_prefill_token_count": doc_count + query_count,
     }
+
+
+def chunking_config_record(
+    chunking_mode: str,
+    *,
+    chunk_size_tokens: int | None = None,
+    chunk_overlap_tokens: int | None = None,
+    max_chunks: int | None = None,
+) -> dict[str, Any]:
+    record: dict[str, Any] = {
+        "chunking_mode": validate_chunking_mode(chunking_mode),
+    }
+    if record["chunking_mode"] == CHUNKING_MODE_TOKEN:
+        record.update(
+            {
+                "chunk_size_tokens": chunk_size_tokens,
+                "chunk_overlap_tokens": chunk_overlap_tokens,
+                "max_chunks": max_chunks,
+            }
+        )
+    return record

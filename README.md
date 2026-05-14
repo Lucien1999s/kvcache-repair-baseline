@@ -19,6 +19,7 @@ metric pipeline.
 ```text
 src/contextflow/
   data/          Input schemas, dataset loaders, prompt formatting, tokenization
+  chunking/      Token-based long-document chunking utilities
   methods/       Full recompute, naive reuse, CacheBlend-style, FusionRAG-style
   repair/        HKVD/QGS selectors and model-family repair adapters
   kv_cache/      KV precompute, enriched precompute, assembly, RoPE correction
@@ -113,6 +114,26 @@ python experiments/cacheblend_chunk_sweep_runner.py \
   --torch-dtype auto
 ```
 
+Run a token-chunked long-context sweep:
+
+```bash
+python experiments/cacheblend_chunk_sweep_runner.py \
+  --dataset longbook_qa_en \
+  --input data/raw/longbook_qa_en/test.jsonl \
+  --model Qwen/Qwen2.5-7B-Instruct \
+  --model-family qwen2 \
+  --limit 1 \
+  --chunking token \
+  --chunk-size-tokens 1024 \
+  --chunk-overlap-tokens 0 \
+  --max-chunks 128 \
+  --chunk-counts 8,16,32,64,128,all \
+  --methods full_recompute,naive_reuse,cacheblend_repair,fusionrag_repair \
+  --output-jsonl results/longbook_qwen2_7b_token_sweep.jsonl \
+  --device-map auto \
+  --torch-dtype auto
+```
+
 ## Documentation
 
 - [Setup](docs/setup.md): environment, dataset preparation, and smoke checks.
@@ -123,8 +144,8 @@ python experiments/cacheblend_chunk_sweep_runner.py \
 
 ## Scope
 
-The current codebase does not include retrieval/reranking pipelines, token-based
-long-document chunking, vLLM hooks, request scheduling, or CPU/GPU KV-store
-switching. Dataset inputs are expected to provide passages/chunks. Long-context
-chunking and KV-store/offload components are reserved for the next ContextFlow
-development phases.
+The current codebase does not include retrieval/reranking pipelines, vLLM hooks,
+request scheduling, or CPU/GPU KV-store switching. Dataset inputs may provide
+passages/chunks directly, or long-context rows can be token-chunked by the
+diagnostic runner. KV-store/offload components are reserved for the next
+ContextFlow development phases.

@@ -7,7 +7,7 @@ from typing import Any
 from contextflow.data.schema import Context, InputExample
 
 
-SUPPORTED_QA_DATASET_KEYS = {"musique", "2wiki"}
+SUPPORTED_QA_DATASET_KEYS = {"musique", "2wiki", "longbook_qa_en", "long_context_qa"}
 
 
 def load_json_examples(path: str | Path) -> list[InputExample]:
@@ -69,7 +69,7 @@ def extract_examples_from_json_object(raw_data: dict[str, Any], data_path: Path)
         value = raw_data.get(key)
         if isinstance(value, list):
             return value
-    if "question" in raw_data:
+    if "question" in raw_data or ("input" in raw_data and "context" in raw_data):
         return [raw_data]
     raise ValueError(
         f"Expected JSON object in {data_path} to contain one of data/examples/instances/records "
@@ -91,11 +91,13 @@ def parse_input_examples(raw_examples: list[dict[str, Any]]) -> list[InputExampl
 
 
 def load_qa_dataset_examples(dataset: str, path: str | Path) -> list[InputExample]:
-    """Load local JSON/JSONL MuSiQue or 2Wiki examples into InputExample objects.
+    """Load local JSON/JSONL QA examples into InputExample objects.
 
     Dataset loader scope is intentionally narrow: dataset/prepared input -> InputExample.
     It does not perform retrieval, reranking, chunking, evidence filtering, or model execution.
     The dataset key "2wiki" refers to 2WikiMultiHopQA / 2WikiMQA-style multi-hop QA data.
+    The dataset key "longbook_qa_en" refers to LongBook-QA-English-style long-context
+    QA rows with one or more long document/context text fields.
     """
 
     raw_examples = load_json_or_jsonl(path)
@@ -114,6 +116,8 @@ def parse_qa_dataset_examples(dataset: str, raw_examples: list[dict[str, Any]]) 
             examples.append(parse_musique_example(raw_example))
         elif dataset_key == "2wiki":
             examples.append(parse_2wiki_example(raw_example))
+        elif dataset_key in {"longbook_qa_en", "long_context_qa"}:
+            examples.append(parse_long_context_qa_example(raw_example, dataset_key))
         else:
             raise ValueError(f"Unsupported dataset key: {dataset!r}.")
     return examples
@@ -127,6 +131,15 @@ def normalize_dataset_key(dataset: str) -> str:
         "2wikimultihopqa": "2wiki",
         "2wikimqa": "2wiki",
         "wikimqa": "2wiki",
+        "longbook_qa_en": "longbook_qa_en",
+        "longbook-qa-en": "longbook_qa_en",
+        "longbookqaen": "longbook_qa_en",
+        "longbook_qa_eng": "longbook_qa_en",
+        "longbook-qa-eng": "longbook_qa_en",
+        "longbookqaeng": "longbook_qa_en",
+        "long_context_qa": "long_context_qa",
+        "long-context-qa": "long_context_qa",
+        "longcontextqa": "long_context_qa",
     }
     if dataset_key not in aliases:
         raise ValueError(
@@ -215,10 +228,84 @@ def parse_2wiki_example(raw_example: dict[str, Any]) -> InputExample:
     )
 
 
+def parse_long_context_qa_example(raw_example: dict[str, Any], dataset_key: str) -> InputExample:
+    """Normalize LongBook-QA-English / generic long-context QA rows.
+
+    This loader keeps the raw long context as one or more InputExample.ctxs. Token-size
+    chunking is handled later by the benchmark chunking layer, not by the dataset loader.
+    """
+
+    if is_cacheblend_prepared_example(raw_example):
+        return normalize_prepared_input_example(raw_example, dataset_key=dataset_key)
+
+    question = require_first_string_field(raw_example, ("question", "query", "input", "prompt"))
+    answers = normalize_answers(
+        raw_example,
+        keys=("answers", "answer", "golden_answers", "outputs", "output", "target", "targets"),
+    )
+    ctxs = normalize_long_contexts(raw_example)
+    if not ctxs:
+        raise ValueError(
+            f"{dataset_key} example must contain at least one context/document text field."
+        )
+
+    return InputExample(
+        question=question,
+        answers=answers,
+        ctxs=ctxs,
+        example_id=normalize_example_id(
+            raw_example,
+            keys=("id", "_id", "example_id", "qid", "sample_id"),
+        ),
+        metadata=build_dataset_metadata(
+            raw_example,
+            dataset_key=dataset_key,
+            known_keys={
+                "id",
+                "_id",
+                "example_id",
+                "qid",
+                "sample_id",
+                "question",
+                "query",
+                "input",
+                "prompt",
+                "answer",
+                "answers",
+                "golden_answers",
+                "outputs",
+                "output",
+                "target",
+                "targets",
+                "ctxs",
+                "contexts",
+                "context",
+                "document",
+                "documents",
+                "article",
+                "passage",
+                "passages",
+                "text",
+                "book",
+                "content",
+                "long_context",
+                "title",
+                "book_title",
+                "document_title",
+                "source",
+            },
+        ),
+    )
+
+
 def is_cacheblend_prepared_example(raw_example: dict[str, Any]) -> bool:
-    return "question" in raw_example and (
-        isinstance(raw_example.get("ctxs"), list)
-        or isinstance(raw_example.get("contexts"), list)
+    if "question" not in raw_example:
+        return False
+    raw_contexts = raw_example.get("ctxs")
+    if raw_contexts is None:
+        raw_contexts = raw_example.get("contexts")
+    return isinstance(raw_contexts, list) and all(
+        isinstance(context, dict) for context in raw_contexts
     )
 
 
@@ -262,7 +349,15 @@ def normalize_prepared_context(raw_context: Any, context_index: int) -> Context:
             f"Prepared context {context_index} must be an object, got {type(raw_context).__name__}."
         )
     title = normalize_optional_string(raw_context.get("title", ""))
-    text = normalize_optional_string(raw_context.get("text", raw_context.get("paragraph_text", "")))
+    text = normalize_optional_string(
+        raw_context.get(
+            "text",
+            raw_context.get(
+                "paragraph_text",
+                raw_context.get("content", raw_context.get("document", "")),
+            ),
+        )
+    )
     return Context(title=title, text=text)
 
 
@@ -338,6 +433,82 @@ def normalize_2wiki_contexts(raw_contexts: Any) -> list[Context]:
     raise ValueError("2wiki example context/ctxs must be a list or Hotpot-style context dict.")
 
 
+def normalize_long_contexts(raw_example: dict[str, Any]) -> list[Context]:
+    for key in (
+        "ctxs",
+        "contexts",
+        "context",
+        "document",
+        "documents",
+        "article",
+        "passage",
+        "passages",
+        "text",
+        "book",
+        "content",
+        "long_context",
+    ):
+        if key not in raw_example or raw_example[key] is None:
+            continue
+        raw_contexts = raw_example[key]
+        title = normalize_optional_string(
+            raw_example.get(
+                "title",
+                raw_example.get(
+                    "book_title",
+                    raw_example.get("document_title", raw_example.get("source", "")),
+                ),
+            )
+        )
+        return normalize_long_context_value(raw_contexts, title=title)
+    return []
+
+
+def normalize_long_context_value(raw_contexts: Any, title: str = "") -> list[Context]:
+    if isinstance(raw_contexts, str):
+        return [Context(title=title, text=raw_contexts)]
+    if isinstance(raw_contexts, dict):
+        if "title" in raw_contexts or "text" in raw_contexts or "paragraph_text" in raw_contexts:
+            return [normalize_prepared_context(raw_contexts, 0)]
+        if "sentences" in raw_contexts or "content" in raw_contexts:
+            context_title = normalize_optional_string(raw_contexts.get("title", title))
+            content = raw_contexts.get("sentences", raw_contexts.get("content"))
+            if isinstance(content, list):
+                text = " ".join(str(sentence) for sentence in content)
+            else:
+                text = normalize_optional_string(content)
+            return [Context(title=context_title, text=text)]
+        raise ValueError("Long-context dict must contain title/text, sentences, or content.")
+    if isinstance(raw_contexts, list):
+        contexts: list[Context] = []
+        for context_index, raw_context in enumerate(raw_contexts):
+            contexts.append(normalize_long_context_item(raw_context, context_index))
+        return contexts
+    raise ValueError(
+        "Long-context field must be a string, object, or list of context items; "
+        f"got {type(raw_contexts).__name__}."
+    )
+
+
+def normalize_long_context_item(raw_context: Any, context_index: int) -> Context:
+    if isinstance(raw_context, str):
+        return Context(title=f"chunk-{context_index}", text=raw_context)
+    if isinstance(raw_context, dict):
+        return normalize_prepared_context(raw_context, context_index)
+    if isinstance(raw_context, (list, tuple)) and len(raw_context) >= 2:
+        title = normalize_optional_string(raw_context[0])
+        content = raw_context[1]
+        if isinstance(content, list):
+            text = " ".join(str(piece) for piece in content)
+        else:
+            text = normalize_optional_string(content)
+        return Context(title=title, text=text)
+    raise ValueError(
+        f"Long-context item {context_index} must be a string, object, or [title, text], "
+        f"got {type(raw_context).__name__}."
+    )
+
+
 def normalize_answers(raw_example: dict[str, Any], keys: tuple[str, ...]) -> list[str]:
     for key in keys:
         if key not in raw_example:
@@ -369,6 +540,13 @@ def require_string_field(raw_example: dict[str, Any], key: str) -> str:
     if key not in raw_example:
         raise ValueError(f"Expected example to contain {key!r}.")
     return str(raw_example[key])
+
+
+def require_first_string_field(raw_example: dict[str, Any], keys: tuple[str, ...]) -> str:
+    for key in keys:
+        if key in raw_example and raw_example[key] is not None:
+            return str(raw_example[key])
+    raise ValueError(f"Expected example to contain one of {keys}.")
 
 
 def build_dataset_metadata(

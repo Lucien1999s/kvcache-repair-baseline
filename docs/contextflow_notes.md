@@ -11,15 +11,17 @@ memory-system components.
 
 ## Next Diagnostic Work
 
-Before adding a KV store or CPU/GPU offload system, the benchmark substrate
-should support:
+Before adding a KV store or CPU/GPU offload system, the benchmark substrate now
+has initial support for:
 
 - token-based long-document chunking
-- long-context QA data such as LongBookQA-style examples
+- LongBookQA-style / generic long-context QA local JSON/JSONL rows
 - chunk sweeps over configurable `chunk_size_tokens`, `chunk_overlap_tokens`,
   and `max_chunks`
-- peak GPU memory delta reporting in addition to absolute peak memory
 - OOM-safe sweep records with method, chunk count, token count, and failed phase
+
+The next diagnostic refinement should add peak GPU memory delta reporting in
+addition to absolute peak memory.
 
 This keeps the baseline diagnostic clean: it measures how the four reference
 methods behave as retrieved/chunked context grows, without mixing in a new

@@ -140,6 +140,7 @@ def build_case_failure_record(
     repair_planner: str,
     chunk_case: dict[str, Any],
     token_counts: dict[str, int] | None = None,
+    chunking_config: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     status = STATUS_OOM if is_oom_error(error) else STATUS_ERROR
     if status == STATUS_OOM:
@@ -160,6 +161,7 @@ def build_case_failure_record(
         "prompt_policy": prompt_policy,
         "prediction_parser": prediction_parser,
         "repair_planner": repair_planner,
+        **dict(chunking_config or {}),
         **dict(token_counts or {}),
         "error": serialize_error(error),
     }

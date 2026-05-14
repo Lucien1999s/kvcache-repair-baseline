@@ -3,10 +3,16 @@ from __future__ import annotations
 from typing import Any
 
 from contextflow.benchmarks.chunk_cases import (
+    CHUNKING_MODE_CONTEXT,
+    CHUNKING_MODE_TOKEN,
+    SUPPORTED_CHUNKING_MODES,
+    chunking_config_record,
     parse_chunk_count_specs,
+    resolve_chunk_cases_for_available_count,
     resolve_example_chunk_cases,
     slice_example_contexts,
     token_count_record,
+    validate_chunking_mode,
 )
 from contextflow.benchmarks.constants import (
     METHOD_CACHEBLEND_REPAIR,
@@ -464,6 +470,7 @@ def build_sweep_case_record(
     repair_planner: str,
     chunk_case: dict[str, Any],
     token_counts: dict[str, int],
+    chunking_config: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     return {
         "record_type": "chunk_sweep_case",
@@ -481,6 +488,7 @@ def build_sweep_case_record(
         "prompt_policy": prompt_policy,
         "prediction_parser": prediction_parser,
         "repair_planner": repair_planner,
+        **dict(chunking_config or {}),
         **token_counts,
         "methods": {},
     }
@@ -493,6 +501,7 @@ def add_sweep_context_to_method_records(
     example_id: str,
     chunk_case: dict[str, Any],
     token_counts: dict[str, int],
+    chunking_config: dict[str, Any] | None = None,
 ) -> None:
     for method_record in method_records.values():
         method_record.update(
@@ -502,6 +511,7 @@ def add_sweep_context_to_method_records(
                 "requested_chunk_count": chunk_case["requested_chunk_count"],
                 "chunk_count": chunk_case["chunk_count"],
                 "available_chunk_count": chunk_case["available_chunk_count"],
+                **dict(chunking_config or {}),
                 **token_counts,
             }
         )
@@ -511,10 +521,16 @@ __all__ = [
     "add_sweep_context_to_method_records",
     "build_case_failure_record",
     "build_sweep_case_record",
+    "CHUNKING_MODE_CONTEXT",
+    "CHUNKING_MODE_TOKEN",
+    "SUPPORTED_CHUNKING_MODES",
+    "chunking_config_record",
     "parse_chunk_count_specs",
+    "resolve_chunk_cases_for_available_count",
     "resolve_example_chunk_cases",
     "run_methods_for_sweep_case",
     "slice_example_contexts",
     "summarize_sweep_results",
     "token_count_record",
+    "validate_chunking_mode",
 ]

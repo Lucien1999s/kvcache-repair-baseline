@@ -5,6 +5,7 @@ import json
 
 from contextflow.data import (
     MUSIQUE_CACHEBLEND_QA_QUERY_PROMPT,
+    SUPPORTED_QA_DATASET_KEYS,
     TWOWIKI_CACHEBLEND_QA_QUERY_PROMPT,
     build_cacheblend_prompt,
     load_qa_dataset_examples,
@@ -53,13 +54,25 @@ TWOWIKI_SAMPLE = {
 }
 
 
+LONGBOOK_SAMPLE = {
+    "id": "longbook-smoke-0",
+    "input": "Who wrote Pride and Prejudice",
+    "answers": ["Jane Austen"],
+    "context": (
+        "Pride and Prejudice is a novel by Jane Austen. "
+        "The book follows Elizabeth Bennet and Fitzwilliam Darcy."
+    ),
+    "title": "Pride and Prejudice",
+}
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Smoke test data, prompt, evaluation, and profiling helpers."
     )
     parser.add_argument(
         "--dataset",
-        choices=["musique", "2wiki"],
+        choices=sorted(SUPPORTED_QA_DATASET_KEYS),
         default=None,
         help="Optional local dataset key to parse after inline checks.",
     )
@@ -75,6 +88,7 @@ def parse_args() -> argparse.Namespace:
 def assert_dataset_parsing() -> None:
     musique = parse_qa_dataset_examples("musique", [MUSIQUE_SAMPLE])[0]
     twowiki = parse_qa_dataset_examples("2wiki", [TWOWIKI_SAMPLE])[0]
+    longbook = parse_qa_dataset_examples("longbook_qa_en", [LONGBOOK_SAMPLE])[0]
 
     assert musique.example_id == "musique-smoke-0"
     assert musique.question == "Who wrote Pride and Prejudice"
@@ -88,6 +102,13 @@ def assert_dataset_parsing() -> None:
     assert len(twowiki.ctxs) == 2
     assert twowiki.ctxs[0].title == "Pride and Prejudice"
     assert twowiki.ctxs[0].text == "Pride and Prejudice is a novel by Jane Austen."
+
+    assert longbook.example_id == "longbook-smoke-0"
+    assert longbook.question == "Who wrote Pride and Prejudice"
+    assert longbook.answers == ["Jane Austen"]
+    assert len(longbook.ctxs) == 1
+    assert longbook.ctxs[0].title == "Pride and Prejudice"
+    assert "Jane Austen" in longbook.ctxs[0].text
 
 
 def assert_prompting() -> None:

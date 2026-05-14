@@ -55,6 +55,12 @@ python scripts/prepare_dataset.py --config configs/datasets/2wiki.yaml --overwri
 The repo dataset key `2wiki` refers to 2WikiMultiHopQA / 2WikiMQA-style
 multi-hop QA data.
 
+The repo dataset key `longbook_qa_en` supports local LongBook-QA-English /
+generic long-context QA JSON/JSONL rows. Expected fields are flexible, but a row
+should provide a question-like field (`question`, `query`, or `input`), an
+answer field (`answers` or `answer`), and a long context field (`context`,
+`document`, `article`, `book`, or `text`).
+
 The preparation script writes local JSONL only. It does not run retrieval,
 reranking, chunking, tokenization, or model execution.
 
@@ -146,6 +152,29 @@ python experiments/cacheblend_chunk_sweep_runner.py \
   --fusionrag-neighbor-top-n 1 \
   --fusionrag-recompute-ratio 0.15 \
   --output-jsonl results/chunk_sweep_musique_mistral_limit1.jsonl \
+  --device-map auto \
+  --torch-dtype auto
+```
+
+Token-chunked long-context sweep:
+
+```bash
+python experiments/cacheblend_chunk_sweep_runner.py \
+  --dataset longbook_qa_en \
+  --input data/raw/longbook_qa_en/test.jsonl \
+  --model Qwen/Qwen2.5-7B-Instruct \
+  --model-family qwen2 \
+  --limit 1 \
+  --chunking token \
+  --chunk-size-tokens 1024 \
+  --chunk-overlap-tokens 0 \
+  --max-chunks 128 \
+  --chunk-counts 8,16,32,64,128,all \
+  --max-new-tokens 16 \
+  --methods full_recompute,naive_reuse,cacheblend_repair,fusionrag_repair \
+  --fusionrag-neighbor-top-n 1 \
+  --fusionrag-recompute-ratio 0.15 \
+  --output-jsonl results/longbook_qwen2_7b_token_sweep.jsonl \
   --device-map auto \
   --torch-dtype auto
 ```

@@ -25,6 +25,7 @@ from contextflow.benchmarks.records import (
 from contextflow.data import (
     PROMPT_POLICY_CACHEBLEND_QA,
     SUPPORTED_CACHEBLEND_PROMPT_POLICIES,
+    SUPPORTED_QA_DATASET_KEYS,
     build_cacheblend_prompt,
     load_qa_dataset_examples,
     normalize_dataset_key,
@@ -39,7 +40,7 @@ def parse_args() -> argparse.Namespace:
             "Dataset-level runner for HF/PyTorch reference baselines."
         )
     )
-    parser.add_argument("--dataset", required=True, choices=["musique", "2wiki"])
+    parser.add_argument("--dataset", required=True, choices=sorted(SUPPORTED_QA_DATASET_KEYS))
     parser.add_argument("--input", required=True, help="Local JSON or JSONL dataset path.")
     parser.add_argument("--model", required=True, help="HuggingFace model name or local path.")
     parser.add_argument("--model-family", required=True, choices=["gpt2", "mistral", "qwen2"])

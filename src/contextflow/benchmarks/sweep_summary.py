@@ -130,6 +130,7 @@ def summarize_sweep_results(
     repair_planner: str,
     chunk_count_specs: list[int | str],
     method_outcomes: dict[str, list[dict[str, Any]]],
+    chunking_config: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     method_summaries: dict[str, Any] = {}
     for method, records in method_outcomes.items():
@@ -161,6 +162,7 @@ def summarize_sweep_results(
         "prompt_policy": prompt_policy,
         "prediction_parser": prediction_parser,
         "repair_planner": repair_planner,
+        **dict(chunking_config or {}),
         "chunk_count_specs": chunk_count_specs,
         "methods": method_summaries,
     }

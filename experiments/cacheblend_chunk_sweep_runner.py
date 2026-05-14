@@ -8,15 +8,21 @@ from typing import Any
 import torch
 
 from contextflow.benchmarks.chunk_sweep import (
+    CHUNKING_MODE_CONTEXT,
+    CHUNKING_MODE_TOKEN,
+    SUPPORTED_CHUNKING_MODES,
     add_sweep_context_to_method_records,
     build_case_failure_record,
     build_sweep_case_record,
+    chunking_config_record,
     parse_chunk_count_specs,
+    resolve_chunk_cases_for_available_count,
     resolve_example_chunk_cases,
     run_methods_for_sweep_case,
     slice_example_contexts,
     summarize_sweep_results,
     token_count_record,
+    validate_chunking_mode,
 )
 from contextflow.benchmarks.constants import (
     DEFAULT_METHODS,
@@ -34,10 +40,17 @@ from contextflow.benchmarks.records import (
 from contextflow.data import (
     PROMPT_POLICY_CACHEBLEND_QA,
     SUPPORTED_CACHEBLEND_PROMPT_POLICIES,
+    SUPPORTED_QA_DATASET_KEYS,
     build_cacheblend_prompt,
     load_qa_dataset_examples,
     normalize_dataset_key,
     tokenize_prompt_example,
+)
+from contextflow.chunking import (
+    TokenChunkingConfig,
+    slice_tokenized_doc_chunks,
+    token_chunk_tokenized_example,
+    token_chunking_metadata,
 )
 from contextflow.runtime import load_hf_causal_lm
 
@@ -48,7 +61,7 @@ def parse_args() -> argparse.Namespace:
             "Chunk-count sweep runner for HF/PyTorch reference baselines."
         )
     )
-    parser.add_argument("--dataset", required=True, choices=["musique", "2wiki"])
+    parser.add_argument("--dataset", required=True, choices=sorted(SUPPORTED_QA_DATASET_KEYS))
     parser.add_argument("--input", required=True, help="Local JSON or JSONL dataset path.")
     parser.add_argument("--model", required=True, help="HuggingFace model name or local path.")
     parser.add_argument("--model-family", required=True, choices=["gpt2", "mistral", "qwen2"])
@@ -57,6 +70,30 @@ def parse_args() -> argparse.Namespace:
         "--chunk-counts",
         default="1,2,4,8,16,32,all",
         help="Comma-separated context counts to sweep. Use 'all' for all contexts.",
+    )
+    parser.add_argument(
+        "--chunking",
+        choices=sorted(SUPPORTED_CHUNKING_MODES),
+        default=CHUNKING_MODE_CONTEXT,
+        help="Use dataset contexts directly or rechunk the tokenized document into fixed token chunks.",
+    )
+    parser.add_argument(
+        "--chunk-size-tokens",
+        type=int,
+        default=1024,
+        help="Token chunk size used when --chunking token.",
+    )
+    parser.add_argument(
+        "--chunk-overlap-tokens",
+        type=int,
+        default=0,
+        help="Token overlap between chunks used when --chunking token.",
+    )
+    parser.add_argument(
+        "--max-chunks",
+        type=int,
+        default=None,
+        help="Maximum produced token chunks when --chunking token.",
     )
     parser.add_argument("--max-new-tokens", type=int, default=16)
     parser.add_argument("--initial-top-k", type=int, default=10)
@@ -122,6 +159,17 @@ def main() -> None:
     dataset_key = normalize_dataset_key(args.dataset)
     methods = parse_methods(args.methods)
     chunk_count_specs = parse_chunk_count_specs(args.chunk_counts)
+    chunking_mode = validate_chunking_mode(args.chunking)
+    summary_chunking_config = chunking_config_record(
+        chunking_mode,
+        chunk_size_tokens=(
+            args.chunk_size_tokens if chunking_mode == CHUNKING_MODE_TOKEN else None
+        ),
+        chunk_overlap_tokens=(
+            args.chunk_overlap_tokens if chunking_mode == CHUNKING_MODE_TOKEN else None
+        ),
+        max_chunks=args.max_chunks if chunking_mode == CHUNKING_MODE_TOKEN else None,
+    )
     if args.limit is not None and args.limit <= 0:
         raise ValueError("--limit must be positive.")
 
@@ -144,20 +192,79 @@ def main() -> None:
 
     with output_path.open("w", encoding="utf-8") as output_file:
         for example_index, full_example in enumerate(examples):
-            chunk_cases = resolve_example_chunk_cases(full_example, chunk_count_specs)
-            for chunk_case in chunk_cases:
-                sliced_example = slice_example_contexts(
-                    full_example,
-                    chunk_count=int(chunk_case["chunk_count"]),
+            if chunking_mode == CHUNKING_MODE_CONTEXT:
+                chunk_cases = resolve_example_chunk_cases(full_example, chunk_count_specs)
+                prepared_cases = [
+                    {
+                        "chunk_case": chunk_case,
+                        "example": slice_example_contexts(
+                            full_example,
+                            chunk_count=int(chunk_case["chunk_count"]),
+                        ),
+                        "tokenized": None,
+                        "chunking_config": chunking_config_record(CHUNKING_MODE_CONTEXT),
+                    }
+                    for chunk_case in chunk_cases
+                ]
+            elif chunking_mode == CHUNKING_MODE_TOKEN:
+                token_chunking_config = TokenChunkingConfig(
+                    chunk_size_tokens=args.chunk_size_tokens,
+                    chunk_overlap_tokens=args.chunk_overlap_tokens,
+                    max_chunks=args.max_chunks,
                 )
+                full_prompt = build_cacheblend_prompt(
+                    full_example,
+                    prompt_policy=args.prompt_policy,
+                    dataset=dataset_key,
+                )
+                full_tokenized = tokenize_prompt_example(full_prompt, bundle.tokenizer)
+                source_doc_token_count = sum(
+                    len(doc_ids) for doc_ids in full_tokenized.doc_chunk_ids
+                )
+                token_chunked = token_chunk_tokenized_example(
+                    full_tokenized,
+                    chunk_size_tokens=args.chunk_size_tokens,
+                    chunk_overlap_tokens=args.chunk_overlap_tokens,
+                    max_chunks=args.max_chunks,
+                )
+                token_chunking_config_record = token_chunking_metadata(
+                    token_chunking_config,
+                    source_doc_token_count=source_doc_token_count,
+                    produced_chunk_count=len(token_chunked.doc_chunk_ids),
+                )
+                chunk_cases = resolve_chunk_cases_for_available_count(
+                    available_count=len(token_chunked.doc_chunk_ids),
+                    chunk_count_specs=chunk_count_specs,
+                )
+                prepared_cases = [
+                    {
+                        "chunk_case": chunk_case,
+                        "example": full_example,
+                        "tokenized": slice_tokenized_doc_chunks(
+                            token_chunked,
+                            chunk_count=int(chunk_case["chunk_count"]),
+                        ),
+                        "chunking_config": token_chunking_config_record,
+                    }
+                    for chunk_case in chunk_cases
+                ]
+            else:
+                raise AssertionError(f"Unhandled chunking mode: {chunking_mode}")
+
+            for prepared_case in prepared_cases:
+                chunk_case = prepared_case["chunk_case"]
+                sliced_example = prepared_case["example"]
+                chunking_config = prepared_case["chunking_config"]
                 token_counts: dict[str, int] = {}
                 try:
-                    prompt = build_cacheblend_prompt(
-                        sliced_example,
-                        prompt_policy=args.prompt_policy,
-                        dataset=dataset_key,
-                    )
-                    tokenized = tokenize_prompt_example(prompt, bundle.tokenizer)
+                    tokenized = prepared_case["tokenized"]
+                    if tokenized is None:
+                        prompt = build_cacheblend_prompt(
+                            sliced_example,
+                            prompt_policy=args.prompt_policy,
+                            dataset=dataset_key,
+                        )
+                        tokenized = tokenize_prompt_example(prompt, bundle.tokenizer)
                     token_counts = token_count_record(tokenized)
                     record = build_sweep_case_record(
                         example_index=example_index,
@@ -171,6 +278,7 @@ def main() -> None:
                         repair_planner=args.repair_planner,
                         chunk_case=chunk_case,
                         token_counts=token_counts,
+                        chunking_config=chunking_config,
                     )
                     with torch.inference_mode():
                         method_records = run_methods_for_sweep_case(
@@ -196,6 +304,7 @@ def main() -> None:
                         example_id=sliced_example.example_id,
                         chunk_case=chunk_case,
                         token_counts=token_counts,
+                        chunking_config=chunking_config,
                     )
                     record["methods"] = method_records
                     for method, method_record in method_records.items():
@@ -213,6 +322,7 @@ def main() -> None:
                         repair_planner=args.repair_planner,
                         chunk_case=chunk_case,
                         token_counts=token_counts,
+                        chunking_config=chunking_config,
                     )
                     write_jsonl_record(output_file, record)
                     if args.continue_on_error or record["status"] == STATUS_OOM:
@@ -230,6 +340,7 @@ def main() -> None:
         repair_planner=args.repair_planner,
         chunk_count_specs=chunk_count_specs,
         method_outcomes=method_outcomes,
+        chunking_config=summary_chunking_config,
     )
     print(json.dumps(summary, indent=2, ensure_ascii=False))
 
