@@ -39,6 +39,21 @@ class FusionRAGRepairResult:
     metadata: dict[str, Any]
 
 
+@dataclass(slots=True)
+class FusionRAGEnrichedContext:
+    enriched_past_key_values: Any
+    doc_chunk_lengths: list[int]
+    doc_total_len: int
+    num_layers: int
+    metadata: dict[str, Any]
+
+
+@dataclass(slots=True)
+class FusionRAGRepairPlanArtifacts:
+    repair_plan: CacheBlendRepairPlan
+    query_selection: FusionRAGQuerySelectionResult
+
+
 def build_fusionrag_repair_plan(
     query_selection: FusionRAGQuerySelectionResult,
     doc_total_len: int,
@@ -75,6 +90,99 @@ def validate_fusionrag_rope_correction_setting(
         )
 
 
+def prepare_fusionrag_enriched_context(
+    model: Any,
+    tokenized_example: TokenizedExample,
+    neighbor_top_n: int = 5,
+    model_family: str = "gpt2",
+    similarity_fn: ChunkSimilarityFn | None = None,
+    apply_rope_source_position_correction: bool = True,
+) -> FusionRAGEnrichedContext:
+    """Precompute FusionRAG neighbor-enriched document KV without selecting tokens."""
+
+    if neighbor_top_n < 0:
+        raise ValueError("neighbor_top_n must be non-negative.")
+    model_family = model_family.lower()
+    validate_fusionrag_rope_correction_setting(
+        model_family=model_family,
+        apply_rope_source_position_correction=apply_rope_source_position_correction,
+    )
+
+    enriched_result = precompute_enriched_doc_chunk_kvs(
+        model=model,
+        example=tokenized_example,
+        neighbor_top_n=neighbor_top_n,
+        similarity_fn=similarity_fn,
+        model_family=model_family,
+        apply_rope_source_position_correction=apply_rope_source_position_correction,
+    )
+    enriched_past_key_values = assemble_chunk_kvs(enriched_result.enriched_chunk_kvs)
+    doc_chunk_lengths = [len(doc_ids) for doc_ids in tokenized_example.doc_chunk_ids]
+    doc_total_len = sum(doc_chunk_lengths)
+    num_layers = len(enriched_past_key_values)
+    if num_layers <= 0:
+        raise ValueError("enriched_past_key_values must contain at least one layer.")
+
+    return FusionRAGEnrichedContext(
+        enriched_past_key_values=enriched_past_key_values,
+        doc_chunk_lengths=doc_chunk_lengths,
+        doc_total_len=doc_total_len,
+        num_layers=num_layers,
+        metadata=dict(enriched_result.metadata),
+    )
+
+
+def prepare_fusionrag_query_repair_plan(
+    model: Any,
+    tokenized_example: TokenizedExample,
+    enriched_context: FusionRAGEnrichedContext,
+    neighbor_top_n: int = 5,
+    recompute_ratio: float = 0.15,
+    model_family: str = "gpt2",
+) -> FusionRAGRepairPlanArtifacts:
+    """Run FusionRAG query-guided selection and build a fixed repair plan."""
+
+    model_family = model_family.lower()
+    query_selection = select_fusionrag_query_guided_tokens(
+        model=model,
+        q_ids=tokenized_example.q_ids,
+        doc_past_key_values=enriched_context.enriched_past_key_values,
+        doc_chunk_lengths=enriched_context.doc_chunk_lengths,
+        recompute_ratio=recompute_ratio,
+        model_family=model_family,
+    )
+
+    rope_correction_applied = enriched_context.metadata.get(
+        "rope_source_position_correction_applied",
+        False,
+    )
+    repair_plan_metadata = {
+        "uses_full_recompute_reference": False,
+        "selection_algorithm": "fusionrag_query_guided_selection",
+        "neighbor_top_n": neighbor_top_n,
+        "recompute_ratio": recompute_ratio,
+        "selected_count": query_selection.recompute_count,
+        "enriched_precompute_metadata": dict(enriched_context.metadata),
+        "query_selection_metadata": query_selection.to_metadata(),
+        "rope_position_correction_applied": rope_correction_applied,
+        "reuse_doc_kv_position_basis": (
+            "fusionrag_enriched_full_context_absolute"
+            if rope_correction_applied
+            else "fusionrag_enriched_native"
+        ),
+    }
+    repair_plan = build_fusionrag_repair_plan(
+        query_selection=query_selection,
+        doc_total_len=enriched_context.doc_total_len,
+        num_layers=enriched_context.num_layers,
+        metadata=repair_plan_metadata,
+    )
+    return FusionRAGRepairPlanArtifacts(
+        repair_plan=repair_plan,
+        query_selection=query_selection,
+    )
+
+
 def run_fusionrag_style_repair_generation(
     model: Any,
     tokenizer: Any,
@@ -94,71 +202,39 @@ def run_fusionrag_style_repair_generation(
 
     if max_new_tokens <= 0:
         raise ValueError("max_new_tokens must be positive.")
-    if neighbor_top_n < 0:
-        raise ValueError("neighbor_top_n must be non-negative.")
     model_family = model_family.lower()
-    validate_fusionrag_rope_correction_setting(
-        model_family=model_family,
-        apply_rope_source_position_correction=apply_rope_source_position_correction,
-    )
 
     total_start = time.perf_counter()
 
     enriched_start = time.perf_counter()
-    enriched_result = precompute_enriched_doc_chunk_kvs(
+    enriched_context = prepare_fusionrag_enriched_context(
         model=model,
-        example=tokenized_example,
+        tokenized_example=tokenized_example,
         neighbor_top_n=neighbor_top_n,
         similarity_fn=similarity_fn,
         model_family=model_family,
         apply_rope_source_position_correction=apply_rope_source_position_correction,
     )
-    enriched_past_key_values = assemble_chunk_kvs(enriched_result.enriched_chunk_kvs)
     enriched_precompute_latency_seconds = time.perf_counter() - enriched_start
 
-    doc_chunk_lengths = [len(doc_ids) for doc_ids in tokenized_example.doc_chunk_ids]
-    doc_total_len = sum(doc_chunk_lengths)
-    num_layers = len(enriched_past_key_values)
-    if num_layers <= 0:
-        raise ValueError("enriched_past_key_values must contain at least one layer.")
-
     selection_start = time.perf_counter()
-    query_selection = select_fusionrag_query_guided_tokens(
+    plan_artifacts = prepare_fusionrag_query_repair_plan(
         model=model,
-        q_ids=tokenized_example.q_ids,
-        doc_past_key_values=enriched_past_key_values,
-        doc_chunk_lengths=doc_chunk_lengths,
+        tokenized_example=tokenized_example,
+        enriched_context=enriched_context,
+        neighbor_top_n=neighbor_top_n,
         recompute_ratio=recompute_ratio,
         model_family=model_family,
     )
     selection_latency_seconds = time.perf_counter() - selection_start
-
-    repair_plan_metadata = {
-        "uses_full_recompute_reference": False,
-        "selection_algorithm": "fusionrag_query_guided_selection",
-        "neighbor_top_n": neighbor_top_n,
-        "recompute_ratio": recompute_ratio,
-        "selected_count": query_selection.recompute_count,
-        "enriched_precompute_latency_seconds": enriched_precompute_latency_seconds,
-        "selection_latency_seconds": selection_latency_seconds,
-        "enriched_precompute_metadata": dict(enriched_result.metadata),
-        "query_selection_metadata": query_selection.to_metadata(),
-        "rope_position_correction_applied": enriched_result.metadata.get(
-            "rope_source_position_correction_applied",
-            False,
-        ),
-        "reuse_doc_kv_position_basis": (
-            "fusionrag_enriched_full_context_absolute"
-            if enriched_result.metadata.get("rope_source_position_correction_applied", False)
-            else "fusionrag_enriched_native"
-        ),
-    }
-    repair_plan = build_fusionrag_repair_plan(
-        query_selection=query_selection,
-        doc_total_len=doc_total_len,
-        num_layers=num_layers,
-        metadata=repair_plan_metadata,
+    plan_artifacts.repair_plan.metadata.update(
+        {
+            "enriched_precompute_latency_seconds": enriched_precompute_latency_seconds,
+            "selection_latency_seconds": selection_latency_seconds,
+        }
     )
+    repair_plan = plan_artifacts.repair_plan
+    query_selection = plan_artifacts.query_selection
 
     repair_start = time.perf_counter()
     partial_repair = run_cacheblend_style_partial_repair_from_plan(
@@ -166,7 +242,7 @@ def run_fusionrag_style_repair_generation(
         tokenized_example=tokenized_example,
         repair_plan=repair_plan,
         model_family=model_family,
-        reuse_past_key_values=enriched_past_key_values,
+        reuse_past_key_values=enriched_context.enriched_past_key_values,
     )
     repair_latency_seconds = time.perf_counter() - repair_start
 
@@ -207,7 +283,7 @@ def run_fusionrag_style_repair_generation(
         output_text=generation.output_text,
         generation=generation,
         repaired_past_key_values=partial_repair.repaired_past_key_values,
-        enriched_past_key_values=enriched_past_key_values,
+        enriched_past_key_values=enriched_context.enriched_past_key_values,
         repair_plan=repair_plan,
         query_selection=query_selection,
         metadata=metadata,

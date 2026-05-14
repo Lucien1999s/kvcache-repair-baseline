@@ -4,6 +4,7 @@ from collections import defaultdict
 from typing import Any
 
 from contextflow.benchmarks.constants import (
+    FUSIONRAG_PROFILE_PHASES,
     STATUS_ERROR,
     STATUS_OOM,
     STATUS_SKIPPED_TOO_LONG,
@@ -68,6 +69,20 @@ def summarize_success_records(records: list[dict[str, Any]]) -> dict[str, Any]:
                 records,
                 "execution_latency_seconds",
             ),
+            **{
+                f"mean_{phase_name}_latency_seconds": mean_optional_float(
+                    records,
+                    f"{phase_name}_latency_seconds",
+                )
+                for phase_name in FUSIONRAG_PROFILE_PHASES
+            },
+            **{
+                f"mean_{phase_name}_peak_gpu_memory_delta_mb": mean_optional_float(
+                    records,
+                    f"{phase_name}_peak_gpu_memory_delta_mb",
+                )
+                for phase_name in FUSIONRAG_PROFILE_PHASES
+            },
         }
     )
     return summary
