@@ -26,6 +26,9 @@ python scripts/prepare_dataset.py \
 Supported source types:
 
 - `huggingface`: uses the `datasets` package to download a configured split.
+  Set `source.streaming: true` for large or schema-irregular HuggingFace
+  datasets where preparing a limited local JSONL subset should not materialize
+  the full Arrow dataset first.
 - `local`: reads an existing local JSON or JSONL file and rewrites a limited
   JSONL subset.
 

@@ -5,6 +5,7 @@ source:
   type: huggingface
   name: xinrongzhang2022/InfiniteBench
   split: longbook_qa_eng
+  streaming: true
 output:
   local_path: data/raw/longbook_qa_en/test.jsonl
   format: jsonl

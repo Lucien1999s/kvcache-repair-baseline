@@ -116,6 +116,9 @@ def load_huggingface_records(source: dict[str, Any], limit: int | None) -> Itera
     if source.get("trust_remote_code") is not None:
         load_kwargs["trust_remote_code"] = bool(source["trust_remote_code"])
 
+    if source.get("streaming") is not None:
+        load_kwargs["streaming"] = bool(source["streaming"])
+
     dataset = load_dataset(str(dataset_name), split=str(split), **load_kwargs)
     return iter_limited_records(dataset, limit=limit)
 

@@ -72,6 +72,8 @@ QA JSON/JSONL rows. Expected fields are flexible, but a row should provide a
 question-like field (`question`, `query`, or `input`), an answer field
 (`answers` or `answer`), and a long context field (`context`, `document`,
 `article`, `book`, or `text`).
+The LongBook-QA-English config uses HuggingFace streaming so small subsets can
+be prepared without first materializing the full Arrow dataset.
 
 The preparation script writes local JSONL only. It does not run retrieval,
 reranking, chunking, tokenization, or model execution.
