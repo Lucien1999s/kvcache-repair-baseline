@@ -15,6 +15,10 @@ from contextflow.benchmarks.chunk_cases import (
     validate_chunking_mode,
 )
 from contextflow.benchmarks.constants import (
+    FUSIONRAG_PHASE_DECODE,
+    FUSIONRAG_PHASE_ENRICHED_PRECOMPUTE,
+    FUSIONRAG_PHASE_QUERY_SELECTION,
+    FUSIONRAG_PHASE_REPAIR,
     METHOD_CACHEBLEND_REPAIR,
     METHOD_FUSIONRAG_REPAIR,
     METHOD_FULL_RECOMPUTE,
@@ -31,6 +35,7 @@ from contextflow.benchmarks.errors import (
 from contextflow.benchmarks.evaluation import evaluate_method_generation
 from contextflow.benchmarks.method_runner import (
     build_cacheblend_repair_record,
+    build_fusionrag_result_from_profiled_phases,
     build_fusionrag_repair_record,
     build_online_cacheblend_repair_record,
     decode_with_past_key_values,
@@ -39,6 +44,7 @@ from contextflow.benchmarks.method_runner import (
 from contextflow.benchmarks.resources import (
     memory_summary_record,
     phase_latency_seconds,
+    run_with_method_cleanup,
     total_phase_latency_seconds,
 )
 from contextflow.benchmarks.sweep_summary import summarize_sweep_results
@@ -50,7 +56,10 @@ from contextflow.methods.cacheblend_repair import (
     run_cacheblend_style_partial_repair_from_plan,
 )
 from contextflow.methods.full_recompute import run_token_aligned_full_recompute_greedy_generation
-from contextflow.methods.fusionrag_repair import run_fusionrag_style_repair_generation
+from contextflow.methods.fusionrag_repair import (
+    prepare_fusionrag_enriched_context,
+    prepare_fusionrag_query_repair_plan,
+)
 
 
 def run_full_recompute_method(
@@ -354,28 +363,96 @@ def run_fusionrag_repair_method(
     fusionrag_recompute_ratio: float,
 ) -> dict[str, Any]:
     phase_metrics: dict[str, dict[str, Any]] = {}
-    result, fusionrag_profile, error = run_phase_capture(
-        "fusionrag_repair_generation",
-        lambda: run_fusionrag_style_repair_generation(
+    enriched_context, enriched_profile, error = run_phase_capture(
+        FUSIONRAG_PHASE_ENRICHED_PRECOMPUTE,
+        lambda: prepare_fusionrag_enriched_context(
             model=model,
-            tokenizer=tokenizer,
             tokenized_example=tokenized_example,
-            max_new_tokens=max_new_tokens,
+            neighbor_top_n=fusionrag_neighbor_top_n,
+            model_family=model_family,
+        ),
+        enable_profiling=enable_profiling,
+    )
+    phase_metrics[FUSIONRAG_PHASE_ENRICHED_PRECOMPUTE] = enriched_profile
+    if error is not None:
+        return handle_phase_error(
+            error,
+            failed_phase=FUSIONRAG_PHASE_ENRICHED_PRECOMPUTE,
+            phase_metrics=phase_metrics,
+            continue_on_error=continue_on_error,
+        )
+
+    plan_artifacts, selection_profile, error = run_phase_capture(
+        FUSIONRAG_PHASE_QUERY_SELECTION,
+        lambda: prepare_fusionrag_query_repair_plan(
+            model=model,
+            tokenized_example=tokenized_example,
+            enriched_context=enriched_context,
             neighbor_top_n=fusionrag_neighbor_top_n,
             recompute_ratio=fusionrag_recompute_ratio,
             model_family=model_family,
         ),
         enable_profiling=enable_profiling,
     )
-    phase_metrics["fusionrag_repair_generation"] = fusionrag_profile
+    phase_metrics[FUSIONRAG_PHASE_QUERY_SELECTION] = selection_profile
     if error is not None:
         return handle_phase_error(
             error,
-            failed_phase="fusionrag_repair_generation",
+            failed_phase=FUSIONRAG_PHASE_QUERY_SELECTION,
             phase_metrics=phase_metrics,
             continue_on_error=continue_on_error,
         )
 
+    partial_repair, repair_profile, error = run_phase_capture(
+        FUSIONRAG_PHASE_REPAIR,
+        lambda: run_cacheblend_style_partial_repair_from_plan(
+            model=model,
+            tokenized_example=tokenized_example,
+            repair_plan=plan_artifacts.repair_plan,
+            model_family=model_family,
+            reuse_past_key_values=enriched_context.enriched_past_key_values,
+        ),
+        enable_profiling=enable_profiling,
+    )
+    phase_metrics[FUSIONRAG_PHASE_REPAIR] = repair_profile
+    if error is not None:
+        return handle_phase_error(
+            error,
+            failed_phase=FUSIONRAG_PHASE_REPAIR,
+            phase_metrics=phase_metrics,
+            continue_on_error=continue_on_error,
+        )
+
+    generation, decode_profile, error = run_phase_capture(
+        FUSIONRAG_PHASE_DECODE,
+        lambda: decode_with_past_key_values(
+            model=model,
+            tokenizer=tokenizer,
+            tokenized_example=tokenized_example,
+            past_key_values=partial_repair.repaired_past_key_values,
+            max_new_tokens=max_new_tokens,
+        ),
+        enable_profiling=enable_profiling,
+    )
+    phase_metrics[FUSIONRAG_PHASE_DECODE] = decode_profile
+    if error is not None:
+        return handle_phase_error(
+            error,
+            failed_phase=FUSIONRAG_PHASE_DECODE,
+            phase_metrics=phase_metrics,
+            continue_on_error=continue_on_error,
+        )
+
+    result = build_fusionrag_result_from_profiled_phases(
+        generation=generation,
+        partial_repair=partial_repair,
+        enriched_context=enriched_context,
+        plan_artifacts=plan_artifacts,
+        model_family=model_family,
+        neighbor_top_n=fusionrag_neighbor_top_n,
+        recompute_ratio=fusionrag_recompute_ratio,
+        phase_metrics=phase_metrics,
+    )
     return build_fusionrag_repair_record(
         result=result,
         answers=answers,
@@ -404,56 +481,64 @@ def run_methods_for_sweep_case(
 ) -> dict[str, dict[str, Any]]:
     method_records: dict[str, dict[str, Any]] = {}
     if METHOD_FULL_RECOMPUTE in methods:
-        method_records[METHOD_FULL_RECOMPUTE] = run_full_recompute_method(
-            tokenized_example=tokenized_example,
-            model=model,
-            tokenizer=tokenizer,
-            answers=answers,
-            max_new_tokens=max_new_tokens,
-            prediction_parser=prediction_parser,
-            enable_profiling=enable_profiling,
-            continue_on_error=continue_on_error,
+        method_records[METHOD_FULL_RECOMPUTE] = run_with_method_cleanup(
+            lambda: run_full_recompute_method(
+                tokenized_example=tokenized_example,
+                model=model,
+                tokenizer=tokenizer,
+                answers=answers,
+                max_new_tokens=max_new_tokens,
+                prediction_parser=prediction_parser,
+                enable_profiling=enable_profiling,
+                continue_on_error=continue_on_error,
+            )
         )
     if METHOD_NAIVE_REUSE in methods:
-        method_records[METHOD_NAIVE_REUSE] = run_naive_reuse_method(
-            tokenized_example=tokenized_example,
-            model=model,
-            tokenizer=tokenizer,
-            answers=answers,
-            max_new_tokens=max_new_tokens,
-            model_family=model_family,
-            prediction_parser=prediction_parser,
-            enable_profiling=enable_profiling,
-            continue_on_error=continue_on_error,
+        method_records[METHOD_NAIVE_REUSE] = run_with_method_cleanup(
+            lambda: run_naive_reuse_method(
+                tokenized_example=tokenized_example,
+                model=model,
+                tokenizer=tokenizer,
+                answers=answers,
+                max_new_tokens=max_new_tokens,
+                model_family=model_family,
+                prediction_parser=prediction_parser,
+                enable_profiling=enable_profiling,
+                continue_on_error=continue_on_error,
+            )
         )
     if METHOD_CACHEBLEND_REPAIR in methods:
-        method_records[METHOD_CACHEBLEND_REPAIR] = run_cacheblend_repair_method(
-            tokenized_example=tokenized_example,
-            model=model,
-            tokenizer=tokenizer,
-            answers=answers,
-            max_new_tokens=max_new_tokens,
-            initial_top_k=initial_top_k,
-            top_k=top_k,
-            model_family=model_family,
-            prediction_parser=prediction_parser,
-            enable_profiling=enable_profiling,
-            continue_on_error=continue_on_error,
-            repair_planner=repair_planner,
+        method_records[METHOD_CACHEBLEND_REPAIR] = run_with_method_cleanup(
+            lambda: run_cacheblend_repair_method(
+                tokenized_example=tokenized_example,
+                model=model,
+                tokenizer=tokenizer,
+                answers=answers,
+                max_new_tokens=max_new_tokens,
+                initial_top_k=initial_top_k,
+                top_k=top_k,
+                model_family=model_family,
+                prediction_parser=prediction_parser,
+                enable_profiling=enable_profiling,
+                continue_on_error=continue_on_error,
+                repair_planner=repair_planner,
+            )
         )
     if METHOD_FUSIONRAG_REPAIR in methods:
-        method_records[METHOD_FUSIONRAG_REPAIR] = run_fusionrag_repair_method(
-            tokenized_example=tokenized_example,
-            model=model,
-            tokenizer=tokenizer,
-            answers=answers,
-            max_new_tokens=max_new_tokens,
-            model_family=model_family,
-            prediction_parser=prediction_parser,
-            enable_profiling=enable_profiling,
-            continue_on_error=continue_on_error,
-            fusionrag_neighbor_top_n=fusionrag_neighbor_top_n,
-            fusionrag_recompute_ratio=fusionrag_recompute_ratio,
+        method_records[METHOD_FUSIONRAG_REPAIR] = run_with_method_cleanup(
+            lambda: run_fusionrag_repair_method(
+                tokenized_example=tokenized_example,
+                model=model,
+                tokenizer=tokenizer,
+                answers=answers,
+                max_new_tokens=max_new_tokens,
+                model_family=model_family,
+                prediction_parser=prediction_parser,
+                enable_profiling=enable_profiling,
+                continue_on_error=continue_on_error,
+                fusionrag_neighbor_top_n=fusionrag_neighbor_top_n,
+                fusionrag_recompute_ratio=fusionrag_recompute_ratio,
+            )
         )
     return method_records
 

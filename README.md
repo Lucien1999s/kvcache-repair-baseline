@@ -148,7 +148,9 @@ Chunk sweeps record `baseline_gpu_memory_mb`, `peak_gpu_memory_mb`, and
 `peak_gpu_memory_delta_mb`; memory-constrained plots should generally use the
 delta field so model weights do not dominate the KV/cache signal. Use
 `--max-total-tokens` to skip over-budget cases explicitly rather than silently
-truncating prompts.
+truncating prompts. FusionRAG-style records additionally expose synchronized
+sub-phase latency and memory delta for enriched precompute, query selection,
+repair, and decode.
 
 ## Documentation
 

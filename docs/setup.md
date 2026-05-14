@@ -200,6 +200,22 @@ measured relative to allocated GPU memory before each method run. If a case
 exceeds `--max-total-tokens`, the runner records `status=skipped_too_long`
 instead of silently truncating.
 
+FusionRAG records expose sub-phase bottlenecks directly:
+
+```text
+fusionrag_enriched_precompute_latency_seconds
+fusionrag_enriched_precompute_peak_gpu_memory_delta_mb
+fusionrag_query_selection_latency_seconds
+fusionrag_query_selection_peak_gpu_memory_delta_mb
+fusionrag_repair_latency_seconds
+fusionrag_repair_peak_gpu_memory_delta_mb
+fusionrag_decode_latency_seconds
+fusionrag_decode_peak_gpu_memory_delta_mb
+```
+
+On failures, `failed_phase` uses the same sub-phase names so OOM boundaries can
+be attributed to enriched precompute, query selection, repair, or decode.
+
 Both runners default to `--repair-planner online_gradual_hkvd`. Use
 `--repair-planner oracle_hkvd` only for diagnostic checks that intentionally use
 full-reference KV.

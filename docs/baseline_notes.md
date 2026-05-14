@@ -145,6 +145,20 @@ report token counts, chunking config, explicit too-long skips, and OOM
 boundaries. For memory plots, prefer `peak_gpu_memory_delta_mb` over raw
 `peak_gpu_memory_mb` because the raw peak includes model weights.
 
+FusionRAG-style repair is profiled as four synchronized outer phases:
+
+- `fusionrag_enriched_precompute`
+- `fusionrag_query_selection`
+- `fusionrag_repair`
+- `fusionrag_decode`
+
+Each FusionRAG method record includes flat latency and memory-delta fields such
+as `fusionrag_enriched_precompute_latency_seconds` and
+`fusionrag_enriched_precompute_peak_gpu_memory_delta_mb`. If an OOM or error
+occurs, `failed_phase` points to the failing sub-phase. The method's internal
+metadata latencies are retained for debugging, but diagnostic plots should use
+the outer phase profiling fields.
+
 Use FusionRAG explicitly in runners:
 
 ```text

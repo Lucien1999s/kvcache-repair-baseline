@@ -3,6 +3,11 @@ from __future__ import annotations
 from typing import Any
 
 from contextflow.benchmarks.constants import (
+    FUSIONRAG_PHASE_DECODE,
+    FUSIONRAG_PHASE_ENRICHED_PRECOMPUTE,
+    FUSIONRAG_PHASE_QUERY_SELECTION,
+    FUSIONRAG_PHASE_REPAIR,
+    FUSIONRAG_PROFILE_PHASES,
     METHOD_CACHEBLEND_REPAIR,
     METHOD_FUSIONRAG_REPAIR,
     METHOD_FULL_RECOMPUTE,
@@ -16,6 +21,8 @@ from contextflow.benchmarks.resources import (
     memory_summary_record,
     phase_latency_seconds,
     run_profiled_phase,
+    run_with_method_cleanup,
+    selected_phase_profile_fields,
     total_phase_latency_seconds,
 )
 from contextflow.kv_cache import (
@@ -33,7 +40,8 @@ from contextflow.methods.cacheblend_repair import (
 from contextflow.methods.full_recompute import run_token_aligned_full_recompute_greedy_generation
 from contextflow.methods.fusionrag_repair import (
     FusionRAGRepairResult,
-    run_fusionrag_style_repair_generation,
+    prepare_fusionrag_enriched_context,
+    prepare_fusionrag_query_repair_plan,
 )
 from contextflow.runtime.hf_cached_generation import generate_with_past_key_values
 
@@ -253,8 +261,26 @@ def build_fusionrag_repair_record(
         include_status=include_status,
     )
     metadata = result.metadata
-    repair_latency_seconds = metadata.get("repair_latency_seconds")
-    decode_latency_seconds = metadata.get("decode_latency_seconds")
+    enriched_precompute_latency_seconds = (
+        phase_latency_seconds(phase_metrics[FUSIONRAG_PHASE_ENRICHED_PRECOMPUTE])
+        if FUSIONRAG_PHASE_ENRICHED_PRECOMPUTE in phase_metrics
+        else metadata.get("enriched_precompute_latency_seconds")
+    )
+    selection_latency_seconds = (
+        phase_latency_seconds(phase_metrics[FUSIONRAG_PHASE_QUERY_SELECTION])
+        if FUSIONRAG_PHASE_QUERY_SELECTION in phase_metrics
+        else metadata.get("selection_latency_seconds")
+    )
+    repair_latency_seconds = (
+        phase_latency_seconds(phase_metrics[FUSIONRAG_PHASE_REPAIR])
+        if FUSIONRAG_PHASE_REPAIR in phase_metrics
+        else metadata.get("repair_latency_seconds")
+    )
+    decode_latency_seconds = (
+        phase_latency_seconds(phase_metrics[FUSIONRAG_PHASE_DECODE])
+        if FUSIONRAG_PHASE_DECODE in phase_metrics
+        else metadata.get("decode_latency_seconds")
+    )
     execution_latency_seconds = None
     if repair_latency_seconds is not None and decode_latency_seconds is not None:
         execution_latency_seconds = float(repair_latency_seconds) + float(
@@ -276,10 +302,8 @@ def build_fusionrag_repair_record(
                 "execution_uses_full_recompute_reference"
             ),
             "planning_included_in_total_latency": False,
-            "enriched_precompute_latency_seconds": metadata.get(
-                "enriched_precompute_latency_seconds"
-            ),
-            "selection_latency_seconds": metadata.get("selection_latency_seconds"),
+            "enriched_precompute_latency_seconds": enriched_precompute_latency_seconds,
+            "selection_latency_seconds": selection_latency_seconds,
             "repair_latency_seconds": repair_latency_seconds,
             "decode_latency_seconds": decode_latency_seconds,
             "execution_latency_seconds": execution_latency_seconds,
@@ -287,6 +311,7 @@ def build_fusionrag_repair_record(
             "total_latency_seconds": total_latency_seconds,
             "latency_seconds": total_latency_seconds,
             **memory_summary_record(phase_metrics),
+            **selected_phase_profile_fields(phase_metrics, FUSIONRAG_PROFILE_PHASES),
             "phase_metrics": phase_metrics,
             "enriched_precompute_metadata": metadata.get(
                 "enriched_precompute_metadata",
@@ -297,6 +322,59 @@ def build_fusionrag_repair_record(
         }
     )
     return method_record
+
+
+def build_fusionrag_result_from_profiled_phases(
+    generation: Any,
+    partial_repair: Any,
+    enriched_context: Any,
+    plan_artifacts: Any,
+    model_family: str,
+    neighbor_top_n: int,
+    recompute_ratio: float,
+    phase_metrics: dict[str, dict[str, Any]],
+) -> FusionRAGRepairResult:
+    query_selection = plan_artifacts.query_selection
+    repair_plan = plan_artifacts.repair_plan
+    metadata = {
+        "method": METHOD_FUSIONRAG_REPAIR,
+        "model_family": model_family,
+        "neighbor_top_n": neighbor_top_n,
+        "recompute_ratio": recompute_ratio,
+        "selected_count": query_selection.recompute_count,
+        "selected_indices": list(query_selection.selected_indices),
+        "selected_indices_by_score": list(query_selection.selected_indices_by_score),
+        "enriched_precompute_latency_seconds": phase_latency_seconds(
+            phase_metrics[FUSIONRAG_PHASE_ENRICHED_PRECOMPUTE]
+        ),
+        "selection_latency_seconds": phase_latency_seconds(
+            phase_metrics[FUSIONRAG_PHASE_QUERY_SELECTION]
+        ),
+        "repair_latency_seconds": phase_latency_seconds(
+            phase_metrics[FUSIONRAG_PHASE_REPAIR]
+        ),
+        "decode_latency_seconds": phase_latency_seconds(
+            phase_metrics[FUSIONRAG_PHASE_DECODE]
+        ),
+        "total_latency_seconds": total_phase_latency_seconds(phase_metrics),
+        "execution_uses_full_recompute_reference": False,
+        "repair_plan_strategy": repair_plan.strategy,
+        "runtime_selection_mode": repair_plan.runtime_selection_mode,
+        "layer_selected_counts": list(repair_plan.layer_selected_counts),
+        "enriched_precompute_metadata": dict(enriched_context.metadata),
+        "query_selection_metadata": query_selection.to_metadata(),
+        "partial_repair_metadata": dict(partial_repair.metadata),
+    }
+    return FusionRAGRepairResult(
+        generated_ids=generation.generated_ids,
+        output_text=generation.output_text,
+        generation=generation,
+        repaired_past_key_values=partial_repair.repaired_past_key_values,
+        enriched_past_key_values=enriched_context.enriched_past_key_values,
+        repair_plan=repair_plan,
+        query_selection=query_selection,
+        metadata=metadata,
+    )
 
 
 def run_methods_for_example(
@@ -316,7 +394,8 @@ def run_methods_for_example(
     fusionrag_recompute_ratio: float = 0.15,
 ) -> dict[str, dict[str, Any]]:
     method_records: dict[str, dict[str, Any]] = {}
-    if METHOD_FULL_RECOMPUTE in methods:
+
+    def run_full_recompute_record() -> dict[str, Any]:
         full_record, full_profile = run_profiled_phase(
             lambda: run_full_recompute(
                 tokenized_example,
@@ -332,9 +411,9 @@ def run_methods_for_example(
         full_record["latency_seconds"] = phase_latency_seconds(full_profile)
         full_record["total_latency_seconds"] = phase_latency_seconds(full_profile)
         full_record.update(memory_summary_record(full_record["phase_metrics"]))
-        method_records[METHOD_FULL_RECOMPUTE] = full_record
+        return full_record
 
-    if METHOD_NAIVE_REUSE in methods:
+    def run_naive_reuse_record() -> dict[str, Any]:
         naive_reuse_kv, naive_reuse_profile = run_profiled_phase(
             lambda: precompute_reuse_doc_kv(
                 model=model,
@@ -376,9 +455,9 @@ def run_methods_for_example(
                 ),
             }
         )
-        method_records[METHOD_NAIVE_REUSE] = naive_record
+        return naive_record
 
-    if METHOD_CACHEBLEND_REPAIR in methods and repair_planner == REPAIR_PLANNER_ORACLE_HKVD:
+    def run_oracle_cacheblend_record() -> dict[str, Any]:
         planning_artifacts, plan_profile = run_profiled_phase(
             lambda: prepare_cacheblend_repair_plan_with_artifacts(
                 model=model,
@@ -417,7 +496,7 @@ def run_methods_for_example(
             "repair": repair_profile,
             "decode": repair_decode_profile,
         }
-        method_records[METHOD_CACHEBLEND_REPAIR] = build_cacheblend_repair_record(
+        method_record = build_cacheblend_repair_record(
             generation=repair_generation,
             answers=answers,
             prediction_parser=prediction_parser,
@@ -425,12 +504,10 @@ def run_methods_for_example(
             partial_repair_metadata=partial_repair.metadata,
             phase_metrics=repair_phase_metrics,
         )
-        method_records[METHOD_CACHEBLEND_REPAIR]["repair_planner"] = repair_planner
+        method_record["repair_planner"] = repair_planner
+        return method_record
 
-    if (
-        METHOD_CACHEBLEND_REPAIR in methods
-        and repair_planner == REPAIR_PLANNER_ONLINE_GRADUAL_HKVD
-    ):
+    def run_online_cacheblend_record() -> dict[str, Any]:
         online_reuse_kv, online_reuse_profile = run_profiled_phase(
             lambda: precompute_reuse_doc_kv(
                 model=model,
@@ -465,35 +542,105 @@ def run_methods_for_example(
             "online_repair": online_repair_profile,
             "decode": repair_decode_profile,
         }
-        method_records[METHOD_CACHEBLEND_REPAIR] = build_online_cacheblend_repair_record(
+        return build_online_cacheblend_repair_record(
             generation=repair_generation,
             answers=answers,
             prediction_parser=prediction_parser,
             partial_repair_metadata=partial_repair.metadata,
             phase_metrics=repair_phase_metrics,
         )
-    if METHOD_CACHEBLEND_REPAIR in methods and repair_planner not in SUPPORTED_REPAIR_PLANNERS:
-        raise ValueError(
-            f"Unsupported repair_planner={repair_planner!r}. "
-            f"Supported planners: {sorted(SUPPORTED_REPAIR_PLANNERS)}."
-        )
-    if METHOD_FUSIONRAG_REPAIR in methods:
-        fusionrag_result, fusionrag_profile = run_profiled_phase(
-            lambda: run_fusionrag_style_repair_generation(
+
+    def run_fusionrag_record() -> dict[str, Any]:
+        phase_metrics: dict[str, dict[str, Any]] = {}
+        enriched_context, enriched_profile = run_profiled_phase(
+            lambda: prepare_fusionrag_enriched_context(
                 model=model,
-                tokenizer=tokenizer,
                 tokenized_example=tokenized_example,
-                max_new_tokens=max_new_tokens,
+                neighbor_top_n=fusionrag_neighbor_top_n,
+                model_family=model_family,
+            ),
+            enable_profiling=enable_profiling,
+        )
+        phase_metrics[FUSIONRAG_PHASE_ENRICHED_PRECOMPUTE] = enriched_profile
+
+        plan_artifacts, selection_profile = run_profiled_phase(
+            lambda: prepare_fusionrag_query_repair_plan(
+                model=model,
+                tokenized_example=tokenized_example,
+                enriched_context=enriched_context,
                 neighbor_top_n=fusionrag_neighbor_top_n,
                 recompute_ratio=fusionrag_recompute_ratio,
                 model_family=model_family,
             ),
             enable_profiling=enable_profiling,
         )
-        method_records[METHOD_FUSIONRAG_REPAIR] = build_fusionrag_repair_record(
-            result=fusionrag_result,
+        phase_metrics[FUSIONRAG_PHASE_QUERY_SELECTION] = selection_profile
+
+        partial_repair, repair_profile = run_profiled_phase(
+            lambda: run_cacheblend_style_partial_repair_from_plan(
+                model=model,
+                tokenized_example=tokenized_example,
+                repair_plan=plan_artifacts.repair_plan,
+                model_family=model_family,
+                reuse_past_key_values=enriched_context.enriched_past_key_values,
+            ),
+            enable_profiling=enable_profiling,
+        )
+        phase_metrics[FUSIONRAG_PHASE_REPAIR] = repair_profile
+
+        generation, decode_profile = run_profiled_phase(
+            lambda: decode_with_past_key_values(
+                model=model,
+                tokenizer=tokenizer,
+                tokenized_example=tokenized_example,
+                past_key_values=partial_repair.repaired_past_key_values,
+                max_new_tokens=max_new_tokens,
+            ),
+            enable_profiling=enable_profiling,
+        )
+        phase_metrics[FUSIONRAG_PHASE_DECODE] = decode_profile
+
+        result = build_fusionrag_result_from_profiled_phases(
+            generation=generation,
+            partial_repair=partial_repair,
+            enriched_context=enriched_context,
+            plan_artifacts=plan_artifacts,
+            model_family=model_family,
+            neighbor_top_n=fusionrag_neighbor_top_n,
+            recompute_ratio=fusionrag_recompute_ratio,
+            phase_metrics=phase_metrics,
+        )
+        return build_fusionrag_repair_record(
+            result=result,
             answers=answers,
             prediction_parser=prediction_parser,
-            phase_metrics={"fusionrag_repair_generation": fusionrag_profile},
+            phase_metrics=phase_metrics,
+        )
+
+    if METHOD_FULL_RECOMPUTE in methods:
+        method_records[METHOD_FULL_RECOMPUTE] = run_with_method_cleanup(
+            run_full_recompute_record
+        )
+    if METHOD_NAIVE_REUSE in methods:
+        method_records[METHOD_NAIVE_REUSE] = run_with_method_cleanup(
+            run_naive_reuse_record
+        )
+    if METHOD_CACHEBLEND_REPAIR in methods:
+        if repair_planner == REPAIR_PLANNER_ORACLE_HKVD:
+            method_records[METHOD_CACHEBLEND_REPAIR] = run_with_method_cleanup(
+                run_oracle_cacheblend_record
+            )
+        elif repair_planner == REPAIR_PLANNER_ONLINE_GRADUAL_HKVD:
+            method_records[METHOD_CACHEBLEND_REPAIR] = run_with_method_cleanup(
+                run_online_cacheblend_record
+            )
+        else:
+            raise ValueError(
+                f"Unsupported repair_planner={repair_planner!r}. "
+                f"Supported planners: {sorted(SUPPORTED_REPAIR_PLANNERS)}."
+            )
+    if METHOD_FUSIONRAG_REPAIR in methods:
+        method_records[METHOD_FUSIONRAG_REPAIR] = run_with_method_cleanup(
+            run_fusionrag_record
         )
     return method_records

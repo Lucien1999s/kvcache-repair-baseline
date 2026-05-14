@@ -4,12 +4,16 @@ from collections import defaultdict
 from typing import Any
 
 from contextflow.benchmarks.constants import (
+    FUSIONRAG_PROFILE_PHASES,
     STATUS_ERROR,
     STATUS_OOM,
     STATUS_SKIPPED_TOO_LONG,
     STATUS_SUCCESS,
 )
-from contextflow.benchmarks.resources import mean_optional_float
+from contextflow.benchmarks.resources import (
+    aggregate_selected_phase_metrics,
+    mean_optional_float,
+)
 from contextflow.evaluation import aggregate_qa_metrics
 
 
@@ -68,6 +72,7 @@ def summarize_success_records(records: list[dict[str, Any]]) -> dict[str, Any]:
                 records,
                 "execution_latency_seconds",
             ),
+            **aggregate_selected_phase_metrics(records, FUSIONRAG_PROFILE_PHASES),
         }
     )
     return summary

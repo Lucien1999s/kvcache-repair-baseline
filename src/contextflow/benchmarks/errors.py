@@ -5,9 +5,14 @@ import time
 from collections.abc import Callable
 from typing import Any
 
-from contextflow.benchmarks.constants import STATUS_ERROR, STATUS_OOM
+from contextflow.benchmarks.constants import (
+    FUSIONRAG_PROFILE_PHASES,
+    STATUS_ERROR,
+    STATUS_OOM,
+)
 from contextflow.benchmarks.resources import (
     memory_summary_record,
+    selected_phase_profile_fields,
     total_phase_latency_seconds,
 )
 from contextflow.data import InputExample
@@ -33,7 +38,11 @@ def clear_cuda_cache_after_failure() -> None:
     except ModuleNotFoundError:
         return
     if torch.cuda.is_available():
-        torch.cuda.empty_cache()
+        try:
+            torch.cuda.empty_cache()
+            torch.cuda.synchronize()
+        except Exception:
+            return
 
 
 def is_oom_error(error: Exception) -> bool:
@@ -125,6 +134,7 @@ def build_failure_record(
         "latency_seconds": total_phase_latency_seconds(phase_metrics),
         "total_latency_seconds": total_phase_latency_seconds(phase_metrics),
         **memory_summary_record(phase_metrics),
+        **selected_phase_profile_fields(phase_metrics, FUSIONRAG_PROFILE_PHASES),
     }
 
 
