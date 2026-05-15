@@ -150,7 +150,9 @@ delta field so model weights do not dominate the KV/cache signal. Use
 `--max-total-tokens` to skip over-budget cases explicitly rather than silently
 truncating prompts. FusionRAG-style records additionally expose synchronized
 sub-phase latency and memory delta for enriched precompute, query selection,
-repair, and decode.
+repair, and decode. Add `--enable-micro-profiling` only when diagnosing repair
+internals; it appends `micro_phase_metrics` and `repair_micro_summary` without
+changing the default JSONL schema.
 
 ## Documentation
 

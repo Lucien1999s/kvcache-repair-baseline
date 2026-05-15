@@ -161,6 +161,14 @@ def parse_args() -> argparse.Namespace:
         default=True,
         help="Record synchronized latency and peak GPU memory by phase when available.",
     )
+    parser.add_argument(
+        "--enable-micro-profiling",
+        action="store_true",
+        help=(
+            "Record repair-internal micro phase latency and peak GPU memory for "
+            "CacheBlend-style and FusionRAG-style repair."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -359,6 +367,7 @@ def main() -> None:
                             model_family=args.model_family,
                             prediction_parser=args.prediction_parser,
                             enable_profiling=args.enable_profiling,
+                            enable_micro_profiling=args.enable_micro_profiling,
                             continue_on_error=args.continue_on_error,
                             repair_planner=args.repair_planner,
                             fusionrag_neighbor_top_n=args.fusionrag_neighbor_top_n,

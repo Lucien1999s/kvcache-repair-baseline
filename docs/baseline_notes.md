@@ -159,6 +159,13 @@ occurs, `failed_phase` points to the failing sub-phase. The method's internal
 metadata latencies are retained for debugging, but diagnostic plots should use
 the outer phase profiling fields.
 
+When chunk sweeps are run with `--enable-micro-profiling`, repair records also
+include `micro_phase_metrics` and `repair_micro_summary`. These optional fields
+break CacheBlend-style and FusionRAG-style repair into selected-hidden-state
+construction, attention-mask allocation, per-layer partial forwards, KV patch
+updates, and finalization. They are intended only for bottleneck diagnosis and
+are omitted by default to preserve the stable JSONL schema.
+
 Use FusionRAG explicitly in runners:
 
 ```text

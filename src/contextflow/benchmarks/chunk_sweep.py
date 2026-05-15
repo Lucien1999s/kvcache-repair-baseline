@@ -60,6 +60,18 @@ from contextflow.methods.fusionrag_repair import (
     prepare_fusionrag_enriched_context,
     prepare_fusionrag_query_repair_plan,
 )
+from contextflow.profiling import MicroProfiler
+
+
+def attach_micro_profile_record(
+    method_record: dict[str, Any],
+    micro_profiler: MicroProfiler | None,
+) -> dict[str, Any]:
+    if micro_profiler is None or not micro_profiler.records:
+        return method_record
+    method_record["micro_phase_metrics"] = micro_profiler.to_records()
+    method_record["repair_micro_summary"] = micro_profiler.summary()
+    return method_record
 
 
 def run_full_recompute_method(
@@ -195,6 +207,7 @@ def run_cacheblend_repair_method(
     model_family: str,
     prediction_parser: str,
     enable_profiling: bool,
+    enable_micro_profiling: bool,
     continue_on_error: bool,
     repair_planner: str,
 ) -> dict[str, Any]:
@@ -218,6 +231,9 @@ def run_cacheblend_repair_method(
                 continue_on_error=continue_on_error,
             )
 
+        micro_profiler = (
+            MicroProfiler(enabled=True) if enable_micro_profiling else None
+        )
         partial_repair, online_repair_profile, error = run_phase_capture(
             "online_repair",
             lambda: run_cacheblend_style_online_partial_repair(
@@ -227,16 +243,20 @@ def run_cacheblend_repair_method(
                 top_k=top_k,
                 model_family=model_family,
                 reuse_past_key_values=reuse_doc_kv,
+                micro_profiler=micro_profiler,
             ),
             enable_profiling=enable_profiling,
         )
         phase_metrics["online_repair"] = online_repair_profile
         if error is not None:
-            return handle_phase_error(
-                error,
-                failed_phase="online_repair",
-                phase_metrics=phase_metrics,
-                continue_on_error=continue_on_error,
+            return attach_micro_profile_record(
+                handle_phase_error(
+                    error,
+                    failed_phase="online_repair",
+                    phase_metrics=phase_metrics,
+                    continue_on_error=continue_on_error,
+                ),
+                micro_profiler,
             )
 
         generation, decode_profile, error = run_phase_capture(
@@ -252,11 +272,14 @@ def run_cacheblend_repair_method(
         )
         phase_metrics["decode"] = decode_profile
         if error is not None:
-            return handle_phase_error(
-                error,
-                failed_phase="decode",
-                phase_metrics=phase_metrics,
-                continue_on_error=continue_on_error,
+            return attach_micro_profile_record(
+                handle_phase_error(
+                    error,
+                    failed_phase="decode",
+                    phase_metrics=phase_metrics,
+                    continue_on_error=continue_on_error,
+                ),
+                micro_profiler,
             )
 
         return build_online_cacheblend_repair_record(
@@ -298,6 +321,7 @@ def run_cacheblend_repair_method(
     repair_reuse_kv = planning_artifacts.reuse_doc_kv
     del planning_artifacts
 
+    micro_profiler = MicroProfiler(enabled=True) if enable_micro_profiling else None
     partial_repair, repair_profile, error = run_phase_capture(
         "repair",
         lambda: run_cacheblend_style_partial_repair_from_plan(
@@ -306,16 +330,21 @@ def run_cacheblend_repair_method(
             repair_plan=repair_plan,
             model_family=model_family,
             reuse_past_key_values=repair_reuse_kv,
+            micro_profiler=micro_profiler,
+            micro_phase_prefix="cacheblend",
         ),
         enable_profiling=enable_profiling,
     )
     phase_metrics["repair"] = repair_profile
     if error is not None:
-        return handle_phase_error(
-            error,
-            failed_phase="repair",
-            phase_metrics=phase_metrics,
-            continue_on_error=continue_on_error,
+        return attach_micro_profile_record(
+            handle_phase_error(
+                error,
+                failed_phase="repair",
+                phase_metrics=phase_metrics,
+                continue_on_error=continue_on_error,
+            ),
+            micro_profiler,
         )
 
     generation, decode_profile, error = run_phase_capture(
@@ -331,11 +360,14 @@ def run_cacheblend_repair_method(
     )
     phase_metrics["decode"] = decode_profile
     if error is not None:
-        return handle_phase_error(
-            error,
-            failed_phase="decode",
-            phase_metrics=phase_metrics,
-            continue_on_error=continue_on_error,
+        return attach_micro_profile_record(
+            handle_phase_error(
+                error,
+                failed_phase="decode",
+                phase_metrics=phase_metrics,
+                continue_on_error=continue_on_error,
+            ),
+            micro_profiler,
         )
 
     return build_cacheblend_repair_record(
@@ -358,6 +390,7 @@ def run_fusionrag_repair_method(
     model_family: str,
     prediction_parser: str,
     enable_profiling: bool,
+    enable_micro_profiling: bool,
     continue_on_error: bool,
     fusionrag_neighbor_top_n: int,
     fusionrag_recompute_ratio: float,
@@ -403,6 +436,7 @@ def run_fusionrag_repair_method(
             continue_on_error=continue_on_error,
         )
 
+    micro_profiler = MicroProfiler(enabled=True) if enable_micro_profiling else None
     partial_repair, repair_profile, error = run_phase_capture(
         FUSIONRAG_PHASE_REPAIR,
         lambda: run_cacheblend_style_partial_repair_from_plan(
@@ -411,16 +445,21 @@ def run_fusionrag_repair_method(
             repair_plan=plan_artifacts.repair_plan,
             model_family=model_family,
             reuse_past_key_values=enriched_context.enriched_past_key_values,
+            micro_profiler=micro_profiler,
+            micro_phase_prefix="fusionrag",
         ),
         enable_profiling=enable_profiling,
     )
     phase_metrics[FUSIONRAG_PHASE_REPAIR] = repair_profile
     if error is not None:
-        return handle_phase_error(
-            error,
-            failed_phase=FUSIONRAG_PHASE_REPAIR,
-            phase_metrics=phase_metrics,
-            continue_on_error=continue_on_error,
+        return attach_micro_profile_record(
+            handle_phase_error(
+                error,
+                failed_phase=FUSIONRAG_PHASE_REPAIR,
+                phase_metrics=phase_metrics,
+                continue_on_error=continue_on_error,
+            ),
+            micro_profiler,
         )
 
     generation, decode_profile, error = run_phase_capture(
@@ -436,11 +475,14 @@ def run_fusionrag_repair_method(
     )
     phase_metrics[FUSIONRAG_PHASE_DECODE] = decode_profile
     if error is not None:
-        return handle_phase_error(
-            error,
-            failed_phase=FUSIONRAG_PHASE_DECODE,
-            phase_metrics=phase_metrics,
-            continue_on_error=continue_on_error,
+        return attach_micro_profile_record(
+            handle_phase_error(
+                error,
+                failed_phase=FUSIONRAG_PHASE_DECODE,
+                phase_metrics=phase_metrics,
+                continue_on_error=continue_on_error,
+            ),
+            micro_profiler,
         )
 
     result = build_fusionrag_result_from_profiled_phases(
@@ -474,6 +516,7 @@ def run_methods_for_sweep_case(
     model_family: str,
     prediction_parser: str,
     enable_profiling: bool,
+    enable_micro_profiling: bool,
     continue_on_error: bool,
     repair_planner: str,
     fusionrag_neighbor_top_n: int = 5,
@@ -520,6 +563,7 @@ def run_methods_for_sweep_case(
                 model_family=model_family,
                 prediction_parser=prediction_parser,
                 enable_profiling=enable_profiling,
+                enable_micro_profiling=enable_micro_profiling,
                 continue_on_error=continue_on_error,
                 repair_planner=repair_planner,
             )
@@ -535,6 +579,7 @@ def run_methods_for_sweep_case(
                 model_family=model_family,
                 prediction_parser=prediction_parser,
                 enable_profiling=enable_profiling,
+                enable_micro_profiling=enable_micro_profiling,
                 continue_on_error=continue_on_error,
                 fusionrag_neighbor_top_n=fusionrag_neighbor_top_n,
                 fusionrag_recompute_ratio=fusionrag_recompute_ratio,

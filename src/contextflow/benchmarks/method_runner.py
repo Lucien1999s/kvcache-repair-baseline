@@ -177,6 +177,14 @@ def build_cacheblend_repair_record(
             "layer_selected_counts": list(repair_plan.layer_selected_counts),
         }
     )
+    if "micro_phase_metrics" in partial_repair_metadata:
+        method_record["micro_phase_metrics"] = partial_repair_metadata[
+            "micro_phase_metrics"
+        ]
+        method_record["repair_micro_summary"] = partial_repair_metadata.get(
+            "repair_micro_summary",
+            {},
+        )
     return method_record
 
 
@@ -242,6 +250,14 @@ def build_online_cacheblend_repair_record(
             ),
         }
     )
+    if "micro_phase_metrics" in partial_repair_metadata:
+        method_record["micro_phase_metrics"] = partial_repair_metadata[
+            "micro_phase_metrics"
+        ]
+        method_record["repair_micro_summary"] = partial_repair_metadata.get(
+            "repair_micro_summary",
+            {},
+        )
     return method_record
 
 
@@ -321,6 +337,15 @@ def build_fusionrag_repair_record(
             "partial_repair_metadata": metadata.get("partial_repair_metadata", {}),
         }
     )
+    partial_repair_metadata = metadata.get("partial_repair_metadata", {})
+    if "micro_phase_metrics" in partial_repair_metadata:
+        method_record["micro_phase_metrics"] = partial_repair_metadata[
+            "micro_phase_metrics"
+        ]
+        method_record["repair_micro_summary"] = partial_repair_metadata.get(
+            "repair_micro_summary",
+            {},
+        )
     return method_record
 
 
