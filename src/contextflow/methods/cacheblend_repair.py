@@ -15,6 +15,7 @@ from contextflow.kv_cache import (
     rope_position_correction_enabled,
 )
 from contextflow.kv_cache.precompute import infer_model_input_device, normalize_past_key_values
+from contextflow.profiling.micro import MicroProfiler, profile_micro_step
 from contextflow.repair.cacheblend_selector import (
     compute_kv_deviation,
     l2_norm_by_token,
@@ -817,12 +818,121 @@ def run_model_family_partial_repair(
     )
 
 
+def build_repair_micro_summary_metadata(
+    *,
+    doc_total_len: int,
+    runtime_selected_count: int,
+    num_layers: int,
+    layer_selected_counts: list[int],
+    repair_plan_strategy: str | None = None,
+    runtime_selection_mode: str | None = None,
+) -> dict[str, Any]:
+    metadata: dict[str, Any] = {
+        "doc_total_len": doc_total_len,
+        "runtime_selected_count": runtime_selected_count,
+        "selected_ratio": (
+            float(runtime_selected_count) / float(doc_total_len)
+            if doc_total_len > 0
+            else None
+        ),
+        "num_layers": num_layers,
+        "layer_selected_counts": list(layer_selected_counts),
+    }
+    if repair_plan_strategy is not None:
+        metadata["repair_plan_strategy"] = repair_plan_strategy
+    if runtime_selection_mode is not None:
+        metadata["runtime_selection_mode"] = runtime_selection_mode
+    return metadata
+
+
+def attach_micro_profile_metadata(
+    metadata: dict[str, Any],
+    micro_profiler: MicroProfiler | None,
+    micro_summary_metadata: dict[str, Any],
+) -> None:
+    if micro_profiler is None:
+        return
+    metadata["micro_phase_metrics"] = micro_profiler.to_records()
+    summary = micro_profiler.summary()
+    summary.update(micro_summary_metadata)
+    metadata["repair_micro_summary"] = summary
+
+
+def run_model_family_partial_repair_with_micro(
+    model: Any,
+    model_family: str,
+    selected_hidden_states: Any,
+    selected_indices: list[int],
+    reuse_past_key_values: Any,
+    num_layers: int,
+    attention_mask: Any,
+    selected_indices_by_layer: dict[int, list[int]],
+    micro_profiler: MicroProfiler | None,
+    micro_prefix: str,
+) -> tuple[Any, tuple[tuple[Any, Any], ...]]:
+    patched_past_key_values = list(reuse_past_key_values)
+    current_selected_hidden_states = selected_hidden_states
+    current_selected_indices = list(selected_indices)
+    loop_start = time.perf_counter()
+    loop_record_start = len(micro_profiler.records) if micro_profiler is not None else 0
+
+    for layer_index in range(num_layers):
+        selected_for_layer = selected_indices_by_layer[layer_index]
+        with profile_micro_step(
+            micro_profiler,
+            f"{micro_prefix}_partial_layer_{layer_index:02d}",
+        ):
+            current_selected_hidden_states = select_hidden_states_for_indices(
+                hidden_states=current_selected_hidden_states,
+                current_indices=current_selected_indices,
+                target_indices=selected_for_layer,
+            )
+            current_selected_indices = selected_for_layer
+            current_selected_hidden_states, patched_layer_kv = run_model_family_partial_layer(
+                model=model,
+                model_family=model_family,
+                layer_index=layer_index,
+                selected_hidden_states=current_selected_hidden_states,
+                selected_indices=selected_for_layer,
+                layer_kv=patched_past_key_values[layer_index],
+                attention_mask=attention_mask,
+            )
+
+        with profile_micro_step(micro_profiler, f"{micro_prefix}_kv_patch_update"):
+            original_key, original_value = reuse_past_key_values[layer_index][:2]
+            patched_key, patched_value = patched_layer_kv[:2]
+            if tuple(patched_key.shape) != tuple(original_key.shape):
+                raise ValueError(
+                    f"Layer {layer_index} patched key shape must match reused key shape; "
+                    f"got {patched_key.shape} and {original_key.shape}."
+                )
+            if tuple(patched_value.shape) != tuple(original_value.shape):
+                raise ValueError(
+                    f"Layer {layer_index} patched value shape must match reused value shape; "
+                    f"got {patched_value.shape} and {original_value.shape}."
+                )
+            patched_past_key_values[layer_index] = patched_layer_kv
+
+    if micro_profiler is not None:
+        micro_profiler.add_aggregate_record(
+            name=f"{micro_prefix}_partial_layer_loop_total",
+            child_records=micro_profiler.records[loop_record_start:],
+            latency_seconds=time.perf_counter() - loop_start,
+        )
+
+    with profile_micro_step(micro_profiler, f"{micro_prefix}_finalize_repaired_kv"):
+        repaired_past_key_values = tuple(patched_past_key_values)
+    return current_selected_hidden_states, repaired_past_key_values
+
+
 def run_cacheblend_style_partial_repair_from_plan(
     model: Any,
     tokenized_example: TokenizedExample,
     repair_plan: CacheBlendRepairPlan,
     model_family: str = "gpt2",
     reuse_past_key_values: Any | None = None,
+    micro_profiler: MicroProfiler | None = None,
+    micro_phase_prefix: str = "cacheblend",
 ) -> CacheBlendPartialRepairResult:
     """Execute selected-token partial KV repair from a precomputed repair plan.
 
@@ -832,60 +942,87 @@ def run_cacheblend_style_partial_repair_from_plan(
     """
 
     model_family = model_family.lower()
-    doc_input_ids = assemble_doc_input_ids(tokenized_example)
-    validate_repair_plan_for_doc_input(repair_plan, doc_input_ids)
-    expected_rope_correction = rope_position_correction_enabled(model_family)
-    planned_rope_correction = repair_plan.metadata.get("rope_position_correction_applied")
-    if (
-        planned_rope_correction is not None
-        and bool(planned_rope_correction) != expected_rope_correction
-    ):
-        raise ValueError(
-            "repair_plan rope_position_correction_applied does not match model_family; "
-            f"plan has {planned_rope_correction}, model_family={model_family!r} "
-            f"expects {expected_rope_correction}."
-        )
-
-    reuse_precompute_latency_seconds: float | None = None
-    if reuse_past_key_values is None:
-        reuse_precompute_start = time.perf_counter()
-        chunk_kvs = precompute_doc_chunk_kvs(model, tokenized_example)
-        chunk_kvs = correct_doc_chunk_kvs_for_model_family(
-            model=model,
-            chunk_kvs=chunk_kvs,
-            model_family=model_family,
-        )
-        reuse_doc_kv = assemble_chunk_kvs(chunk_kvs)
-        reuse_precompute_latency_seconds = time.perf_counter() - reuse_precompute_start
-        reuse_past_key_values_source = "computed_from_doc_chunks"
+    if micro_phase_prefix == "cacheblend":
+        with profile_micro_step(micro_profiler, "cacheblend_assemble_doc_input_ids"):
+            doc_input_ids = assemble_doc_input_ids(tokenized_example)
     else:
-        reuse_doc_kv = reuse_past_key_values
-        reuse_past_key_values_source = "provided"
-    reuse_doc_kv = validate_reuse_past_key_values_for_plan(reuse_doc_kv, repair_plan)
+        doc_input_ids = assemble_doc_input_ids(tokenized_example)
+
+    with profile_micro_step(micro_profiler, f"{micro_phase_prefix}_validate_reuse_kv"):
+        validate_repair_plan_for_doc_input(repair_plan, doc_input_ids)
+        expected_rope_correction = rope_position_correction_enabled(model_family)
+        planned_rope_correction = repair_plan.metadata.get("rope_position_correction_applied")
+        if (
+            planned_rope_correction is not None
+            and bool(planned_rope_correction) != expected_rope_correction
+        ):
+            raise ValueError(
+                "repair_plan rope_position_correction_applied does not match model_family; "
+                f"plan has {planned_rope_correction}, model_family={model_family!r} "
+                f"expects {expected_rope_correction}."
+            )
+
+        reuse_precompute_latency_seconds: float | None = None
+        if reuse_past_key_values is None:
+            reuse_precompute_start = time.perf_counter()
+            chunk_kvs = precompute_doc_chunk_kvs(model, tokenized_example)
+            chunk_kvs = correct_doc_chunk_kvs_for_model_family(
+                model=model,
+                chunk_kvs=chunk_kvs,
+                model_family=model_family,
+            )
+            reuse_doc_kv = assemble_chunk_kvs(chunk_kvs)
+            reuse_precompute_latency_seconds = time.perf_counter() - reuse_precompute_start
+            reuse_past_key_values_source = "computed_from_doc_chunks"
+        else:
+            reuse_doc_kv = reuse_past_key_values
+            reuse_past_key_values_source = "provided"
+        reuse_doc_kv = validate_reuse_past_key_values_for_plan(reuse_doc_kv, repair_plan)
 
     runtime_selected_indices = repair_plan.runtime_selected_indices
     repair_start = time.perf_counter()
-    selected_hidden_states = compute_model_family_selected_initial_hidden_states(
-        model=model,
-        model_family=model_family,
-        doc_input_ids=doc_input_ids,
-        selected_indices=runtime_selected_indices,
-    )
-    doc_attention_mask = torch.ones(
-        (1, repair_plan.doc_total_len),
-        dtype=torch.long,
-        device=selected_hidden_states.device,
-    )
-    final_selected_hidden_states, repaired_doc_kv = run_model_family_partial_repair(
-        model=model,
-        model_family=model_family,
-        selected_hidden_states=selected_hidden_states,
-        selected_indices=runtime_selected_indices,
-        reuse_past_key_values=reuse_doc_kv,
-        num_layers=repair_plan.num_layers,
-        attention_mask=doc_attention_mask,
-        selected_indices_by_layer=repair_plan.selected_indices_by_layer,
-    )
+    with profile_micro_step(
+        micro_profiler,
+        f"{micro_phase_prefix}_selected_initial_hidden_states",
+    ):
+        selected_hidden_states = compute_model_family_selected_initial_hidden_states(
+            model=model,
+            model_family=model_family,
+            doc_input_ids=doc_input_ids,
+            selected_indices=runtime_selected_indices,
+        )
+    with profile_micro_step(micro_profiler, f"{micro_phase_prefix}_doc_attention_mask"):
+        doc_attention_mask = torch.ones(
+            (1, repair_plan.doc_total_len),
+            dtype=torch.long,
+            device=selected_hidden_states.device,
+        )
+    if micro_profiler is None:
+        final_selected_hidden_states, repaired_doc_kv = run_model_family_partial_repair(
+            model=model,
+            model_family=model_family,
+            selected_hidden_states=selected_hidden_states,
+            selected_indices=runtime_selected_indices,
+            reuse_past_key_values=reuse_doc_kv,
+            num_layers=repair_plan.num_layers,
+            attention_mask=doc_attention_mask,
+            selected_indices_by_layer=repair_plan.selected_indices_by_layer,
+        )
+    else:
+        final_selected_hidden_states, repaired_doc_kv = (
+            run_model_family_partial_repair_with_micro(
+                model=model,
+                model_family=model_family,
+                selected_hidden_states=selected_hidden_states,
+                selected_indices=runtime_selected_indices,
+                reuse_past_key_values=reuse_doc_kv,
+                num_layers=repair_plan.num_layers,
+                attention_mask=doc_attention_mask,
+                selected_indices_by_layer=repair_plan.selected_indices_by_layer,
+                micro_profiler=micro_profiler,
+                micro_prefix=micro_phase_prefix,
+            )
+        )
     repair_latency_seconds = time.perf_counter() - repair_start
 
     metadata = {
@@ -900,6 +1037,18 @@ def run_cacheblend_style_partial_repair_from_plan(
         "repair_latency_seconds": repair_latency_seconds,
     }
     metadata.update(repair_plan.to_metadata())
+    attach_micro_profile_metadata(
+        metadata,
+        micro_profiler,
+        build_repair_micro_summary_metadata(
+            doc_total_len=repair_plan.doc_total_len,
+            runtime_selected_count=len(runtime_selected_indices),
+            num_layers=repair_plan.num_layers,
+            layer_selected_counts=repair_plan.layer_selected_counts,
+            repair_plan_strategy=repair_plan.strategy,
+            runtime_selection_mode=repair_plan.runtime_selection_mode,
+        ),
+    )
     return CacheBlendPartialRepairResult(
         final_selected_hidden_states=final_selected_hidden_states,
         repaired_past_key_values=repaired_doc_kv,
@@ -914,6 +1063,7 @@ def run_cacheblend_style_online_partial_repair(
     top_k: int = 5,
     model_family: str = "gpt2",
     reuse_past_key_values: Any | None = None,
+    micro_profiler: MicroProfiler | None = None,
 ) -> CacheBlendOnlinePartialRepairResult:
     """Run non-oracle gradual HKVD selection and partial repair together.
 
@@ -927,58 +1077,67 @@ def run_cacheblend_style_online_partial_repair(
         raise ValueError("initial_top_k and top_k must be positive.")
 
     model_family = model_family.lower()
-    doc_input_ids = assemble_doc_input_ids(tokenized_example)
-    doc_total_len = len(doc_input_ids)
-    if doc_total_len <= 0:
-        raise ValueError("Expected tokenized_example.doc_chunk_ids to contain document tokens.")
-
-    expected_rope_correction = rope_position_correction_enabled(model_family)
-    reuse_precompute_latency_seconds: float | None = None
-    if reuse_past_key_values is None:
-        reuse_precompute_start = time.perf_counter()
-        chunk_kvs = precompute_doc_chunk_kvs(model, tokenized_example)
-        chunk_kvs = correct_doc_chunk_kvs_for_model_family(
-            model=model,
-            chunk_kvs=chunk_kvs,
-            model_family=model_family,
-        )
-        reuse_doc_kv = assemble_chunk_kvs(chunk_kvs)
-        reuse_precompute_latency_seconds = time.perf_counter() - reuse_precompute_start
-        reuse_past_key_values_source = "computed_from_doc_chunks"
-    else:
-        reuse_doc_kv = reuse_past_key_values
-        reuse_past_key_values_source = "provided"
-
-    reuse_doc_kv = normalize_past_key_values(reuse_doc_kv)
-    num_layers = len(reuse_doc_kv)
-    if num_layers == 0:
-        raise ValueError("reuse_past_key_values must contain at least one layer.")
-    for layer_index, layer_kv in enumerate(reuse_doc_kv):
-        key, value = layer_kv[0], layer_kv[1]
-        if int(key.shape[-2]) != doc_total_len:
+    with profile_micro_step(micro_profiler, "cacheblend_assemble_doc_input_ids"):
+        doc_input_ids = assemble_doc_input_ids(tokenized_example)
+        doc_total_len = len(doc_input_ids)
+        if doc_total_len <= 0:
             raise ValueError(
-                f"Layer {layer_index} reuse key seq_len must match doc length; "
-                f"got {key.shape[-2]} and {doc_total_len}."
+                "Expected tokenized_example.doc_chunk_ids to contain document tokens."
             )
-        if int(value.shape[-2]) != doc_total_len:
-            raise ValueError(
-                f"Layer {layer_index} reuse value seq_len must match doc length; "
-                f"got {value.shape[-2]} and {doc_total_len}."
+
+    with profile_micro_step(micro_profiler, "cacheblend_validate_reuse_kv"):
+        expected_rope_correction = rope_position_correction_enabled(model_family)
+        reuse_precompute_latency_seconds: float | None = None
+        if reuse_past_key_values is None:
+            reuse_precompute_start = time.perf_counter()
+            chunk_kvs = precompute_doc_chunk_kvs(model, tokenized_example)
+            chunk_kvs = correct_doc_chunk_kvs_for_model_family(
+                model=model,
+                chunk_kvs=chunk_kvs,
+                model_family=model_family,
             )
+            reuse_doc_kv = assemble_chunk_kvs(chunk_kvs)
+            reuse_precompute_latency_seconds = time.perf_counter() - reuse_precompute_start
+            reuse_past_key_values_source = "computed_from_doc_chunks"
+        else:
+            reuse_doc_kv = reuse_past_key_values
+            reuse_past_key_values_source = "provided"
+
+        reuse_doc_kv = normalize_past_key_values(reuse_doc_kv)
+        num_layers = len(reuse_doc_kv)
+        if num_layers == 0:
+            raise ValueError("reuse_past_key_values must contain at least one layer.")
+        for layer_index, layer_kv in enumerate(reuse_doc_kv):
+            key, value = layer_kv[0], layer_kv[1]
+            if int(key.shape[-2]) != doc_total_len:
+                raise ValueError(
+                    f"Layer {layer_index} reuse key seq_len must match doc length; "
+                    f"got {key.shape[-2]} and {doc_total_len}."
+                )
+            if int(value.shape[-2]) != doc_total_len:
+                raise ValueError(
+                    f"Layer {layer_index} reuse value seq_len must match doc length; "
+                    f"got {value.shape[-2]} and {doc_total_len}."
+                )
 
     repair_start = time.perf_counter()
     active_indices = list(range(doc_total_len))
-    selected_hidden_states = compute_model_family_selected_initial_hidden_states(
-        model=model,
-        model_family=model_family,
-        doc_input_ids=doc_input_ids,
-        selected_indices=active_indices,
-    )
-    doc_attention_mask = torch.ones(
-        (1, doc_total_len),
-        dtype=torch.long,
-        device=selected_hidden_states.device,
-    )
+    with profile_micro_step(
+        micro_profiler,
+        "cacheblend_selected_initial_hidden_states",
+    ):
+        selected_hidden_states = compute_model_family_selected_initial_hidden_states(
+            model=model,
+            model_family=model_family,
+            doc_input_ids=doc_input_ids,
+            selected_indices=active_indices,
+        )
+    with profile_micro_step(micro_profiler, "cacheblend_doc_attention_mask"):
+        doc_attention_mask = torch.ones(
+            (1, doc_total_len),
+            dtype=torch.long,
+            device=selected_hidden_states.device,
+        )
 
     patched_past_key_values = list(reuse_doc_kv)
     selected_indices_by_layer: dict[int, list[int]] = {}
@@ -988,32 +1147,39 @@ def run_cacheblend_style_online_partial_repair(
 
     current_hidden_states = selected_hidden_states
     current_indices = active_indices
+    loop_start = time.perf_counter()
+    loop_record_start = len(micro_profiler.records) if micro_profiler is not None else 0
     for layer_index in range(num_layers):
         selected_for_layer = list(current_indices)
         selected_indices_by_layer[layer_index] = selected_for_layer
-        next_hidden_states, patched_layer_kv = run_model_family_partial_layer(
-            model=model,
-            model_family=model_family,
-            layer_index=layer_index,
-            selected_hidden_states=current_hidden_states,
-            selected_indices=selected_for_layer,
-            layer_kv=patched_past_key_values[layer_index],
-            attention_mask=doc_attention_mask,
-        )
+        with profile_micro_step(
+            micro_profiler,
+            f"cacheblend_partial_layer_{layer_index:02d}",
+        ):
+            next_hidden_states, patched_layer_kv = run_model_family_partial_layer(
+                model=model,
+                model_family=model_family,
+                layer_index=layer_index,
+                selected_hidden_states=current_hidden_states,
+                selected_indices=selected_for_layer,
+                layer_kv=patched_past_key_values[layer_index],
+                attention_mask=doc_attention_mask,
+            )
 
-        original_key, original_value = reuse_doc_kv[layer_index][:2]
-        patched_key, patched_value = patched_layer_kv[:2]
-        if tuple(patched_key.shape) != tuple(original_key.shape):
-            raise ValueError(
-                f"Layer {layer_index} patched key shape must match reused key shape; "
-                f"got {patched_key.shape} and {original_key.shape}."
-            )
-        if tuple(patched_value.shape) != tuple(original_value.shape):
-            raise ValueError(
-                f"Layer {layer_index} patched value shape must match reused value shape; "
-                f"got {patched_value.shape} and {original_value.shape}."
-            )
-        patched_past_key_values[layer_index] = patched_layer_kv
+        with profile_micro_step(micro_profiler, "cacheblend_kv_patch_update"):
+            original_key, original_value = reuse_doc_kv[layer_index][:2]
+            patched_key, patched_value = patched_layer_kv[:2]
+            if tuple(patched_key.shape) != tuple(original_key.shape):
+                raise ValueError(
+                    f"Layer {layer_index} patched key shape must match reused key shape; "
+                    f"got {patched_key.shape} and {original_key.shape}."
+                )
+            if tuple(patched_value.shape) != tuple(original_value.shape):
+                raise ValueError(
+                    f"Layer {layer_index} patched value shape must match reused value shape; "
+                    f"got {patched_value.shape} and {original_value.shape}."
+                )
+            patched_past_key_values[layer_index] = patched_layer_kv
 
         deviation_scores = layer_kv_deviation_scores_at_indices(
             patched_layer_kv,
@@ -1029,44 +1195,57 @@ def run_cacheblend_style_online_partial_repair(
             continue
 
         next_top_k = initial_top_k if layer_index == 0 else top_k
-        next_indices = select_topk_indices_from_scores(
-            candidate_indices=selected_for_layer,
-            scores=deviation_scores,
-            top_k=next_top_k,
-        )
-        online_deviation_selected_next_by_layer[layer_index] = next_indices
-        current_hidden_states = select_hidden_states_for_indices(
-            hidden_states=next_hidden_states,
-            current_indices=selected_for_layer,
-            target_indices=next_indices,
-        )
-        current_indices = next_indices
+        with profile_micro_step(
+            micro_profiler,
+            "cacheblend_repair_plan_build_or_selection",
+        ):
+            next_indices = select_topk_indices_from_scores(
+                candidate_indices=selected_for_layer,
+                scores=deviation_scores,
+                top_k=next_top_k,
+            )
+            online_deviation_selected_next_by_layer[layer_index] = next_indices
+            current_hidden_states = select_hidden_states_for_indices(
+                hidden_states=next_hidden_states,
+                current_indices=selected_for_layer,
+                target_indices=next_indices,
+            )
+            current_indices = next_indices
 
+    if micro_profiler is not None:
+        micro_profiler.add_aggregate_record(
+            name="cacheblend_partial_layer_loop_total",
+            child_records=micro_profiler.records[loop_record_start:],
+            latency_seconds=time.perf_counter() - loop_start,
+        )
     repair_latency_seconds = time.perf_counter() - repair_start
-    plan_metadata = {
-        "diagnostic_source": "online_fresh_vs_reuse",
-        "uses_full_recompute_reference": False,
-        "selection_algorithm": "online_gradual_hkvd",
-        "initial_top_k": initial_top_k,
-        "top_k": top_k,
-        "rope_position_correction_applied": expected_rope_correction,
-        "reuse_doc_kv_position_basis": (
-            "full_context_absolute" if expected_rope_correction else "native"
-        ),
-        "online_initial_active_set": "all_doc_tokens",
-        "online_deviation_metric": "fresh_kv_vs_reused_kv_l2",
-        "online_deviation_max_by_layer": online_deviation_max_by_layer,
-        "online_deviation_mean_by_layer": online_deviation_mean_by_layer,
-        "online_deviation_selected_next_by_layer": online_deviation_selected_next_by_layer,
-    }
-    plan = build_cacheblend_repair_plan(
-        selected_indices_by_layer=selected_indices_by_layer,
-        doc_total_len=doc_total_len,
-        num_layers=num_layers,
-        metadata=plan_metadata,
-        strategy="online_gradual_hkvd",
-        runtime_selection_mode="online_gradual_selected_indices_by_layer",
-    )
+    with profile_micro_step(micro_profiler, "cacheblend_repair_plan_build_or_selection"):
+        plan_metadata = {
+            "diagnostic_source": "online_fresh_vs_reuse",
+            "uses_full_recompute_reference": False,
+            "selection_algorithm": "online_gradual_hkvd",
+            "initial_top_k": initial_top_k,
+            "top_k": top_k,
+            "rope_position_correction_applied": expected_rope_correction,
+            "reuse_doc_kv_position_basis": (
+                "full_context_absolute" if expected_rope_correction else "native"
+            ),
+            "online_initial_active_set": "all_doc_tokens",
+            "online_deviation_metric": "fresh_kv_vs_reused_kv_l2",
+            "online_deviation_max_by_layer": online_deviation_max_by_layer,
+            "online_deviation_mean_by_layer": online_deviation_mean_by_layer,
+            "online_deviation_selected_next_by_layer": online_deviation_selected_next_by_layer,
+        }
+        plan = build_cacheblend_repair_plan(
+            selected_indices_by_layer=selected_indices_by_layer,
+            doc_total_len=doc_total_len,
+            num_layers=num_layers,
+            metadata=plan_metadata,
+            strategy="online_gradual_hkvd",
+            runtime_selection_mode="online_gradual_selected_indices_by_layer",
+        )
+    with profile_micro_step(micro_profiler, "cacheblend_finalize_repaired_kv"):
+        repaired_past_key_values = tuple(patched_past_key_values)
     metadata = {
         "model_family": model_family,
         "execution_mode": "online_gradual_hkvd",
@@ -1079,10 +1258,22 @@ def run_cacheblend_style_online_partial_repair(
         "repair_latency_seconds": repair_latency_seconds,
     }
     metadata.update(plan.to_metadata())
+    attach_micro_profile_metadata(
+        metadata,
+        micro_profiler,
+        build_repair_micro_summary_metadata(
+            doc_total_len=doc_total_len,
+            runtime_selected_count=len(plan.runtime_selected_indices),
+            num_layers=num_layers,
+            layer_selected_counts=plan.layer_selected_counts,
+            repair_plan_strategy=plan.strategy,
+            runtime_selection_mode=plan.runtime_selection_mode,
+        ),
+    )
     return CacheBlendOnlinePartialRepairResult(
         repair_plan=plan,
         final_selected_hidden_states=current_hidden_states,
-        repaired_past_key_values=tuple(patched_past_key_values),
+        repaired_past_key_values=repaired_past_key_values,
         metadata=metadata,
     )
 

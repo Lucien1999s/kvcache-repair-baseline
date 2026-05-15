@@ -216,6 +216,11 @@ fusionrag_decode_peak_gpu_memory_delta_mb
 On failures, `failed_phase` uses the same sub-phase names so OOM boundaries can
 be attributed to enriched precompute, query selection, repair, or decode.
 
+For repair-internal OOM diagnosis, add `--enable-micro-profiling` to the chunk
+sweep runner. When enabled, CacheBlend-style and FusionRAG-style repair records
+include `micro_phase_metrics` and `repair_micro_summary`, which identify the
+largest memory micro step and the failing micro step when an exception occurs.
+
 Both runners default to `--repair-planner online_gradual_hkvd`. Use
 `--repair-planner oracle_hkvd` only for diagnostic checks that intentionally use
 full-reference KV.
